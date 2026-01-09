@@ -725,9 +725,11 @@ impl App {
                 ..Default::default()
             });
 
-            // Position near cursor with offset so it doesn't cover the cursor
-            let x_pos = (dragging.mouse_pos.x + 20.0).max(0.0);
-            let y_pos = (dragging.mouse_pos.y - 20.0).max(0.0);
+            // Position near cursor, clamped to stay within window bounds
+            let max_x = (self.window_size.width - panel_width).max(0.0);
+            let max_y = (self.window_size.height - panel_height).max(0.0);
+            let x_pos = (dragging.mouse_pos.x + 20.0).clamp(0.0, max_x);
+            let y_pos = (dragging.mouse_pos.y - 20.0).clamp(0.0, max_y);
 
             let positioned = column![
                 Space::new().height(Length::Fixed(y_pos)),
