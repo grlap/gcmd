@@ -53,6 +53,8 @@ pub struct FolderPanel {
     pub is_active: bool,
     pub scrollable_id: Id,
     pub visible_rows: usize,
+    /// Track the visible range (first visible row index)
+    pub scroll_offset: usize,
 }
 
 impl Default for FolderPanel {
@@ -71,6 +73,7 @@ impl FolderPanel {
             is_active: false,
             scrollable_id: Id::unique(),
             visible_rows: 20, // Default estimate, will be updated based on window size
+            scroll_offset: 0,
         };
         panel.load_entries();
         panel
@@ -141,6 +144,20 @@ impl FolderPanel {
         self.entries.get(self.cursor)
     }
 
+    /// Check if cursor is within the visible range
+    pub fn is_cursor_visible(&self) -> bool {
+        self.cursor >= self.scroll_offset && self.cursor < self.scroll_offset + self.visible_rows
+    }
+
+    /// Update scroll offset to keep cursor visible (call after scrolling)
+    pub fn update_scroll_offset_from_cursor(&mut self) {
+        if self.cursor < self.scroll_offset {
+            self.scroll_offset = self.cursor;
+        } else if self.cursor >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = self.cursor.saturating_sub(self.visible_rows - 1);
+        }
+    }
+
     /// Move cursor up by visible_rows (page up)
     pub fn page_up(&mut self) {
         if self.cursor > self.visible_rows {
@@ -148,6 +165,7 @@ impl FolderPanel {
         } else {
             self.cursor = 0;
         }
+        self.update_scroll_offset_from_cursor();
     }
 
     /// Move cursor down by visible_rows (page down)
@@ -158,6 +176,7 @@ impl FolderPanel {
         } else if !self.entries.is_empty() {
             self.cursor = self.entries.len() - 1;
         }
+        self.update_scroll_offset_from_cursor();
     }
 
     /// Jump to first entry matching the search string (case-insensitive prefix match)
@@ -192,5 +211,15 @@ impl FolderPanel {
             return true;
         }
         false
+    }
+
+    /// Navigate to an absolute path
+    pub fn navigate_to(&mut self, path: PathBuf) {
+        if path.is_dir() {
+            self.current_dir = path;
+            self.cursor = 0;
+            self.scroll_offset = 0;
+            self.load_entries();
+        }
     }
 }

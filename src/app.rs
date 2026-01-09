@@ -111,6 +111,27 @@ impl App {
         Theme::Dark
     }
 
+    /// Only scroll if cursor is outside the visible range
+    fn scroll_if_needed(&mut self) -> Task<Message> {
+        if let Some(container) = self.active_tab_container_mut() {
+            let panel = container.active_panel_mut();
+            if !panel.is_cursor_visible() {
+                panel.update_scroll_offset_from_cursor();
+                let cursor = panel.cursor;
+                let total = panel.entries.len();
+                if total == 0 {
+                    return Task::none();
+                }
+                let ratio = cursor as f32 / total.saturating_sub(1).max(1) as f32;
+                return iced::widget::operation::snap_to(
+                    panel.scrollable_id.clone(),
+                    scrollable::RelativeOffset { x: 0.0, y: ratio },
+                );
+            }
+        }
+        Task::none()
+    }
+
     /// Create a scroll task to make cursor visible in the active panel
     fn scroll_to_cursor(&self) -> Task<Message> {
         if let Some(container) = self.active_tab_container_ref() {
@@ -311,13 +332,15 @@ impl App {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_up();
                         }
-                        return self.scroll_to_cursor();
+                        // Only scroll if cursor went out of visible range
+                        return self.scroll_if_needed();
                     }
                     keyboard::Key::Named(Named::ArrowDown) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_down();
                         }
-                        return self.scroll_to_cursor();
+                        // Only scroll if cursor went out of visible range
+                        return self.scroll_if_needed();
                     }
                     keyboard::Key::Named(Named::ArrowLeft) => {
                         // Page up - move by visible rows
@@ -335,9 +358,20 @@ impl App {
                     }
                     keyboard::Key::Named(Named::Enter) => {
                         if self.command_line.starts_with("cd ") {
-                            // Navigate to the selected folder and clear command line
-                            if let Some(c) = self.active_tab_container_mut() {
-                                c.active_panel_mut().enter_selected();
+                            let path = self.command_line[3..].trim();
+                            if path.starts_with('/') {
+                                // Absolute path - navigate directly
+                                let abs_path = std::path::PathBuf::from(path);
+                                if abs_path.is_dir() {
+                                    if let Some(c) = self.active_tab_container_mut() {
+                                        c.active_panel_mut().navigate_to(abs_path);
+                                    }
+                                }
+                            } else {
+                                // Relative path - enter selected folder
+                                if let Some(c) = self.active_tab_container_mut() {
+                                    c.active_panel_mut().enter_selected();
+                                }
                             }
                             self.command_line.clear();
                             return self.scroll_to_cursor();
@@ -392,16 +426,13 @@ impl App {
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
                         // Append character to command line
-                        eprintln!("DEBUG: Key pressed: {:?}, modifiers: {:?}, shift: {}", c, modifiers, modifiers.shift());
                         // iced sends lowercase even with shift - convert if shift is pressed
                         let char_to_add = if modifiers.shift() {
                             c.as_str().to_uppercase()
                         } else {
                             c.as_str().to_string()
                         };
-                        eprintln!("DEBUG: char_to_add: {:?}", char_to_add);
                         self.command_line.push_str(&char_to_add);
-                        eprintln!("DEBUG: command_line is now: {:?}", self.command_line);
                         self.search_from_command_line();
                         return self.scroll_to_cursor();
                     }
@@ -440,7 +471,6 @@ impl App {
         }
 
         let search_term = self.command_line[3..].trim().to_string();
-        eprintln!("DEBUG: search_term: {:?}", search_term);
 
         if !search_term.is_empty() {
             if let Some(container) = self.active_tab_container_mut() {
@@ -589,10 +619,11 @@ impl App {
         .height(Length::Fill);
 
         let command_line = self.view_command_line();
-        let terminal = view_terminal(&self.terminal);
+        // Terminal hidden for now until async PTY reading is implemented
+        // let terminal = view_terminal(&self.terminal);
         let status = self.view_status_bar();
 
-        let content = column![pane_grid_view, command_line, terminal, status]
+        let content = column![pane_grid_view, command_line, status]
             .spacing(0)
             .height(Length::Fill);
 
