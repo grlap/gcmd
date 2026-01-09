@@ -159,4 +159,38 @@ impl FolderPanel {
             self.cursor = self.entries.len() - 1;
         }
     }
+
+    /// Jump to first entry matching the search string (case-insensitive prefix match)
+    pub fn jump_to_match(&mut self, search: &str) -> bool {
+        if search.is_empty() {
+            return false;
+        }
+        let search_lower = search.to_lowercase();
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|e| e.name.to_lowercase().starts_with(&search_lower))
+        {
+            self.cursor = idx;
+            return true;
+        }
+        false
+    }
+
+    /// Jump to first folder matching the search string (case-insensitive prefix match)
+    pub fn jump_to_folder(&mut self, search: &str) -> bool {
+        if search.is_empty() {
+            return false;
+        }
+        let search_lower = search.to_lowercase();
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|e| e.is_dir && e.name.to_lowercase().starts_with(&search_lower))
+        {
+            self.cursor = idx;
+            return true;
+        }
+        false
+    }
 }

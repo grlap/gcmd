@@ -334,6 +334,14 @@ impl App {
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Enter) => {
+                        if self.command_line.starts_with("cd ") {
+                            // Navigate to the selected folder and clear command line
+                            if let Some(c) = self.active_tab_container_mut() {
+                                c.active_panel_mut().enter_selected();
+                            }
+                            self.command_line.clear();
+                            return self.scroll_to_cursor();
+                        }
                         if !self.command_line.is_empty() {
                             // Execute command in terminal
                             self.execute_command_line();
@@ -373,14 +381,29 @@ impl App {
                     keyboard::Key::Named(Named::Backspace) => {
                         // Delete last character from command line
                         self.command_line.pop();
+                        self.search_from_command_line();
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Space) => {
                         // Space key is Named, not Character
                         self.command_line.push(' ');
+                        self.search_from_command_line();
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
                         // Append character to command line
-                        self.command_line.push_str(c.as_str());
+                        eprintln!("DEBUG: Key pressed: {:?}, modifiers: {:?}, shift: {}", c, modifiers, modifiers.shift());
+                        // iced sends lowercase even with shift - convert if shift is pressed
+                        let char_to_add = if modifiers.shift() {
+                            c.as_str().to_uppercase()
+                        } else {
+                            c.as_str().to_string()
+                        };
+                        eprintln!("DEBUG: char_to_add: {:?}", char_to_add);
+                        self.command_line.push_str(&char_to_add);
+                        eprintln!("DEBUG: command_line is now: {:?}", self.command_line);
+                        self.search_from_command_line();
+                        return self.scroll_to_cursor();
                     }
                     _ => {}
                 }
@@ -407,6 +430,23 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    /// Search for entries matching command line input
+    /// Only triggers after user types "cd " - jumps to folders only
+    fn search_from_command_line(&mut self) {
+        if !self.command_line.starts_with("cd ") {
+            return;
+        }
+
+        let search_term = self.command_line[3..].trim().to_string();
+        eprintln!("DEBUG: search_term: {:?}", search_term);
+
+        if !search_term.is_empty() {
+            if let Some(container) = self.active_tab_container_mut() {
+                container.active_panel_mut().jump_to_folder(&search_term);
+            }
+        }
     }
 
     fn execute_command_line(&mut self) {
@@ -509,8 +549,8 @@ impl App {
             // Path header - drag from here to move active tab to other pane
             let path_header_content = container(
                 row![
-                    text("≡ ").size(14),
-                    text(current_path).size(13),
+                    text("≡ ").size(16),
+                    text(current_path).size(15),
                 ]
             )
             .padding([6, 8])
@@ -567,8 +607,8 @@ impl App {
             let current_path = dragging.panel.current_dir.to_string_lossy().to_string();
             let header = container(
                 row![
-                    text("≡ ").size(14),
-                    text(current_path).size(13),
+                    text("≡ ").size(16),
+                    text(current_path).size(15),
                 ]
             )
             .padding([6, 8])
@@ -627,7 +667,7 @@ impl App {
         let cursor = if self.focus == Focus::Panel { "▌" } else { "" };
         let display_text = format!("{}{}{}", prompt, self.command_line, cursor);
 
-        container(text(display_text).size(13).font(iced::Font::MONOSPACE))
+        container(text(display_text).size(15).font(iced::Font::MONOSPACE))
             .width(Length::Fill)
             .padding([4, 8])
             .style(|_theme| container::Style {
@@ -663,8 +703,8 @@ impl App {
 
         container(
             row![
-                text(focus_info).size(12).width(Length::Fill),
-                text(help).size(11),
+                text(focus_info).size(14).width(Length::Fill),
+                text(help).size(13),
             ]
             .spacing(20),
         )

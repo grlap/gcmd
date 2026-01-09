@@ -49,7 +49,7 @@ fn view_tab_bar(container_widget: &TabContainer, pane: pane_grid::Pane) -> Eleme
                 iced::Color::from_rgb(0.15, 0.15, 0.2)
             };
 
-            let tab_content = container(text(label).size(11))
+            let tab_content = container(text(label).size(13))
                 .padding([2, 8])
                 .style(move |_theme| container::Style {
                     background: Some(bg_color.into()),
@@ -78,7 +78,7 @@ fn view_tab_bar(container_widget: &TabContainer, pane: pane_grid::Pane) -> Eleme
     let mut tab_row = Row::with_children(tabs).spacing(2);
 
     // Add "+" button for new tab
-    let add_btn = container(text("+").size(11))
+    let add_btn = container(text("+").size(13))
         .padding([2, 6])
         .style(|_theme| container::Style {
             background: Some(iced::Color::from_rgb(0.2, 0.2, 0.25).into()),

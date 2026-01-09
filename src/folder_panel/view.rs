@@ -185,7 +185,7 @@ pub fn view_panel(panel: &FolderPanel) -> Element<'_, Message> {
 }
 
 fn view_header(panel: &FolderPanel) -> Element<'_, Message> {
-    container(text(panel.title()).size(14))
+    container(text(panel.title()).size(16))
         .width(Length::Fill)
         .padding(4)
         .style(|_theme| container::Style {
@@ -235,14 +235,14 @@ fn view_entry(entry: &FileEntry, is_cursor: bool, is_active_panel: bool) -> Elem
 
     let entry_row = row![
         text(name_display)
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(5))
             .color(name_color),
         text(entry.size_display())
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(2)),
         text(entry.date_display())
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(3)),
     ]
     .spacing(8)
@@ -306,14 +306,14 @@ fn view_entry_with_pane(
 
     let entry_row = row![
         text(name_display)
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(5))
             .color(name_color),
         text(entry.size_display())
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(2)),
         text(entry.date_display())
-            .size(13)
+            .size(15)
             .width(Length::FillPortion(3)),
     ]
     .spacing(8)

@@ -11,7 +11,7 @@ pub fn view_terminal(terminal: &TerminalPanel) -> Element<'_, Message> {
         .into_iter()
         .map(|line| {
             text(line)
-                .size(12)
+                .size(14)
                 .font(iced::Font::MONOSPACE)
                 .into()
         })
