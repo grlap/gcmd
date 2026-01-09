@@ -48,6 +48,7 @@ pub struct App {
     focus: Focus,
     dragging_tab: Option<DraggingTab>,
     window_size: Size,
+    command_line: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -79,6 +80,7 @@ impl Default for App {
             focus: Focus::Panel,
             dragging_tab: None,
             window_size: Size::new(1200.0, 800.0), // Default, will be updated on resize
+            command_line: String::new(),
         }
     }
 }
@@ -228,10 +230,14 @@ impl App {
                 modifiers,
                 ..
             })) => {
-                // Escape cancels drag or returns focus to panels
+                // Escape cancels drag, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
                     if self.dragging_tab.is_some() {
                         self.dragging_tab = None;
+                        return Task::none();
+                    }
+                    if !self.command_line.is_empty() {
+                        self.command_line.clear();
                         return Task::none();
                     }
                     if self.focus == Focus::Terminal {
@@ -326,6 +332,11 @@ impl App {
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Enter) => {
+                        if !self.command_line.is_empty() {
+                            // Execute command in terminal
+                            self.execute_command_line();
+                            return Task::none();
+                        }
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().enter_selected();
                         }
@@ -357,6 +368,18 @@ impl App {
                             }
                         }
                     }
+                    keyboard::Key::Named(Named::Backspace) => {
+                        // Delete last character from command line
+                        self.command_line.pop();
+                    }
+                    keyboard::Key::Named(Named::Space) => {
+                        // Space key is Named, not Character
+                        self.command_line.push(' ');
+                    }
+                    keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
+                        // Append character to command line
+                        self.command_line.push_str(c.as_str());
+                    }
                     _ => {}
                 }
             }
@@ -382,6 +405,24 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    fn execute_command_line(&mut self) {
+        // Spawn shell if not running
+        if !self.terminal.is_running() {
+            let _ = self.terminal.spawn_shell();
+        }
+
+        // Set terminal working directory to current panel's directory
+        if let Some(container) = self.active_tab_container_ref() {
+            let current_dir = container.active_panel().current_dir.clone();
+            self.terminal.set_working_dir(current_dir);
+        }
+
+        // Send command to terminal
+        let cmd = format!("{}\n", self.command_line);
+        self.terminal.send_input(&cmd);
+        self.command_line.clear();
     }
 
     fn toggle_terminal_focus(&mut self) {
@@ -505,10 +546,11 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
+        let command_line = self.view_command_line();
         let terminal = view_terminal(&self.terminal);
         let status = self.view_status_bar();
 
-        let content = column![pane_grid_view, terminal, status]
+        let content = column![pane_grid_view, command_line, terminal, status]
             .spacing(0)
             .height(Length::Fill);
 
@@ -576,6 +618,26 @@ impl App {
         } else {
             main_content
         }
+    }
+
+    fn view_command_line(&self) -> Element<'_, Message> {
+        let prompt = "> ";
+        let cursor = if self.focus == Focus::Panel { "▌" } else { "" };
+        let display_text = format!("{}{}{}", prompt, self.command_line, cursor);
+
+        container(text(display_text).size(13).font(iced::Font::MONOSPACE))
+            .width(Length::Fill)
+            .padding([4, 8])
+            .style(|_theme| container::Style {
+                background: Some(iced::Color::from_rgb(0.08, 0.08, 0.1).into()),
+                border: iced::Border {
+                    color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
