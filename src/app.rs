@@ -1,6 +1,6 @@
-use iced::widget::{column, container, mouse_area, pane_grid, row, stack, text, Space};
+use iced::widget::{column, container, mouse_area, pane_grid, row, scrollable, stack, text, Space};
 use iced::window;
-use iced::{event, keyboard, mouse, Element, Event, Length, Point, Size, Subscription, Theme};
+use iced::{event, keyboard, mouse, Element, Event, Length, Point, Size, Subscription, Task, Theme};
 use iced::keyboard::key::Named;
 
 use crate::folder_panel::FolderPanel;
@@ -109,7 +109,26 @@ impl App {
         Theme::Dark
     }
 
-    pub fn update(&mut self, message: Message) {
+    /// Create a scroll task to make cursor visible in the active panel
+    fn scroll_to_cursor(&self) -> Task<Message> {
+        if let Some(container) = self.active_tab_container_ref() {
+            let panel = container.active_panel();
+            let cursor = panel.cursor;
+            let total = panel.entries.len();
+            if total == 0 {
+                return Task::none();
+            }
+            // Calculate relative position (0.0 to 1.0)
+            let ratio = cursor as f32 / total.saturating_sub(1).max(1) as f32;
+            return iced::widget::operation::snap_to(
+                panel.scrollable_id.clone(),
+                scrollable::RelativeOffset { x: 0.0, y: ratio },
+            );
+        }
+        Task::none()
+    }
+
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             // Pane grid events
             Message::PaneClicked(pane) => {
@@ -213,12 +232,12 @@ impl App {
                 if key == keyboard::Key::Named(Named::Escape) {
                     if self.dragging_tab.is_some() {
                         self.dragging_tab = None;
-                        return;
+                        return Task::none();
                     }
                     if self.focus == Focus::Terminal {
                         self.set_focus_to_pane(self.focus_pane);
                     }
-                    return;
+                    return Task::none();
                 }
 
                 // Global shortcuts
@@ -226,28 +245,28 @@ impl App {
                     // Ctrl+O toggles terminal focus
                     if c.as_str() == "o" && modifiers.control() {
                         self.toggle_terminal_focus();
-                        return;
+                        return Task::none();
                     }
                     // Ctrl+T new tab
                     if c.as_str() == "t" && modifiers.control() && self.focus != Focus::Terminal {
                         if let Some(container) = self.active_tab_container_mut() {
                             container.add_tab();
                         }
-                        return;
+                        return Task::none();
                     }
                     // Ctrl+W close tab
                     if c.as_str() == "w" && modifiers.control() && self.focus != Focus::Terminal {
                         if let Some(container) = self.active_tab_container_mut() {
                             container.close_tab();
                         }
-                        return;
+                        return Task::none();
                     }
                     // Ctrl+Tab next tab
                     if c.as_str() == "\t" && modifiers.control() && self.focus != Focus::Terminal {
                         if let Some(container) = self.active_tab_container_mut() {
                             container.next_tab();
                         }
-                        return;
+                        return Task::none();
                     }
                 }
 
@@ -258,13 +277,13 @@ impl App {
                             if let Some(container) = self.active_tab_container_mut() {
                                 container.next_tab();
                             }
-                            return;
+                            return Task::none();
                         }
                         keyboard::Key::Named(Named::PageUp) => {
                             if let Some(container) = self.active_tab_container_mut() {
                                 container.prev_tab();
                             }
-                            return;
+                            return Task::none();
                         }
                         _ => {}
                     }
@@ -273,53 +292,62 @@ impl App {
                 // Route to terminal if focused
                 if self.focus == Focus::Terminal {
                     self.handle_terminal_key(&key, &modifiers);
-                    return;
+                    return Task::none();
                 }
 
-                // Panel navigation
+                // Panel navigation - these need scroll updates
                 match key {
                     keyboard::Key::Named(Named::Tab) => {
                         self.switch_panel();
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowUp) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_up();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowDown) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_down();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowLeft) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_to_top();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowRight) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_to_bottom();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Enter) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().enter_selected();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Home) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_to_top();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::End) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_to_bottom();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Insert) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().toggle_selection();
                         }
+                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Character(ref c) if c.as_str() == "r" && modifiers.control() => {
                         // Refresh all tabs in all panes
@@ -353,6 +381,7 @@ impl App {
             }
             _ => {}
         }
+        Task::none()
     }
 
     fn toggle_terminal_focus(&mut self) {

@@ -5,7 +5,7 @@ mod tab_container;
 mod terminal_panel;
 
 use app::{App, Message};
-use iced::{Element, Font, Subscription, Theme};
+use iced::{Element, Font, Subscription, Task, Theme};
 
 // Fira Code font (embedded)
 const FIRA_CODE: &[u8] = include_bytes!("../fonts/FiraCode-Regular.ttf");
@@ -21,8 +21,8 @@ fn main() -> iced::Result {
         .run()
 }
 
-fn update(app: &mut App, message: Message) {
-    app.update(message);
+fn update(app: &mut App, message: Message) -> Task<Message> {
+    app.update(message)
 }
 
 fn view(app: &App) -> Element<'_, Message> {

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use bytesize::ByteSize;
 use chrono::{DateTime, Local};
+use iced::widget::Id;
 
 use crate::panel::PanelEntry;
 
@@ -50,6 +51,7 @@ pub struct FolderPanel {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub is_active: bool,
+    pub scrollable_id: Id,
 }
 
 impl Default for FolderPanel {
@@ -66,6 +68,7 @@ impl FolderPanel {
             entries: Vec::new(),
             cursor: 0,
             is_active: false,
+            scrollable_id: Id::unique(),
         };
         panel.load_entries();
         panel

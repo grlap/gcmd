@@ -272,6 +272,7 @@ fn view_entries_with_pane(panel: &FolderPanel, pane: pane_grid::Pane) -> Element
         .width(Length::Fill);
 
     scrollable(content)
+        .id(panel.scrollable_id.clone())
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
