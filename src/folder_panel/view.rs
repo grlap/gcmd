@@ -1,4 +1,4 @@
-use iced::widget::{column, container, mouse_area, pane_grid, row, scrollable, text, Column};
+use iced::widget::{Column, column, container, mouse_area, pane_grid, row, scrollable, text};
 use iced::{Element, Length};
 
 use super::model::{FileEntry, FolderPanel};
@@ -116,7 +116,8 @@ impl Panel for FolderPanel {
 
     fn go_parent(&mut self) -> bool {
         // Remember the current directory name before navigating up
-        let current_dir_name = self.current_dir
+        let current_dir_name = self
+            .current_dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string());
 
@@ -213,7 +214,11 @@ fn view_entries(panel: &FolderPanel) -> Element<'_, Message> {
         .into()
 }
 
-fn view_entry(entry: &FileEntry, is_cursor: bool, is_active_panel: bool) -> Element<'static, Message> {
+fn view_entry(
+    entry: &FileEntry,
+    is_cursor: bool,
+    is_active_panel: bool,
+) -> Element<'static, Message> {
     let name_color = if entry.is_dir() {
         iced::Color::from_rgb(0.4, 0.7, 1.0)
     } else {
@@ -328,13 +333,7 @@ fn view_entry_with_pane(
 
     // Single click selects, double click activates (enters directory)
     mouse_area(entry_container)
-        .on_press(Message::SelectEntry {
-            pane,
-            entry_index,
-        })
-        .on_double_click(Message::ActivateEntry {
-            pane,
-            entry_index,
-        })
+        .on_press(Message::SelectEntry { pane, entry_index })
+        .on_double_click(Message::ActivateEntry { pane, entry_index })
         .into()
 }

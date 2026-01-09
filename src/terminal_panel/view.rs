@@ -1,4 +1,4 @@
-use iced::widget::{container, scrollable, text, Column};
+use iced::widget::{Column, container, scrollable, text};
 use iced::{Element, Length};
 
 use super::model::TerminalPanel;
@@ -9,12 +9,7 @@ pub fn view_terminal(terminal: &TerminalPanel) -> Element<'_, Message> {
 
     let content: Vec<Element<Message>> = lines
         .into_iter()
-        .map(|line| {
-            text(line)
-                .size(14)
-                .font(iced::Font::MONOSPACE)
-                .into()
-        })
+        .map(|line| text(line).size(14).font(iced::Font::MONOSPACE).into())
         .collect();
 
     let terminal_content = Column::with_children(content)
