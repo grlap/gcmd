@@ -320,14 +320,16 @@ impl App {
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowLeft) => {
+                        // Page up - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
-                            c.active_panel_mut().move_to_top();
+                            c.active_panel_mut().page_up();
                         }
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::ArrowRight) => {
+                        // Page down - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
-                            c.active_panel_mut().move_to_bottom();
+                            c.active_panel_mut().page_down();
                         }
                         return self.scroll_to_cursor();
                     }

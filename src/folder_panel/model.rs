@@ -52,6 +52,7 @@ pub struct FolderPanel {
     pub cursor: usize,
     pub is_active: bool,
     pub scrollable_id: Id,
+    pub visible_rows: usize,
 }
 
 impl Default for FolderPanel {
@@ -69,6 +70,7 @@ impl FolderPanel {
             cursor: 0,
             is_active: false,
             scrollable_id: Id::unique(),
+            visible_rows: 20, // Default estimate, will be updated based on window size
         };
         panel.load_entries();
         panel
@@ -137,5 +139,24 @@ impl FolderPanel {
 
     pub fn current_entry(&self) -> Option<&FileEntry> {
         self.entries.get(self.cursor)
+    }
+
+    /// Move cursor up by visible_rows (page up)
+    pub fn page_up(&mut self) {
+        if self.cursor > self.visible_rows {
+            self.cursor -= self.visible_rows;
+        } else {
+            self.cursor = 0;
+        }
+    }
+
+    /// Move cursor down by visible_rows (page down)
+    pub fn page_down(&mut self) {
+        let new_cursor = self.cursor + self.visible_rows;
+        if new_cursor < self.entries.len() {
+            self.cursor = new_cursor;
+        } else if !self.entries.is_empty() {
+            self.cursor = self.entries.len() - 1;
+        }
     }
 }
