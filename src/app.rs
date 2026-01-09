@@ -1,31 +1,54 @@
-use iced::widget::{column, container, mouse_area, pane_grid, row, scrollable, stack, text, Space};
-use iced::window;
-use iced::{event, keyboard, mouse, Element, Event, Length, Point, Size, Subscription, Task, Theme};
 use iced::keyboard::key::Named;
+use iced::widget::{Space, column, container, mouse_area, pane_grid, row, scrollable, stack, text};
+use iced::window;
+use iced::{
+    Element, Event, Length, Point, Size, Subscription, Task, Theme, event, keyboard, mouse,
+};
 
 use crate::folder_panel::FolderPanel;
 use crate::folder_panel::view::view_panel_with_pane;
 use crate::panel::{Panel, PanelEntry};
 use crate::tab_container::TabContainer;
 use crate::tab_container::view_tab_container;
-use crate::terminal_panel::{TerminalKey, TerminalPanel};
 use crate::terminal_panel::view::view_terminal;
+use crate::terminal_panel::{TerminalKey, TerminalPanel};
 
 #[derive(Debug, Clone)]
 pub enum Message {
     EventOccurred(Event),
     // Tab actions
-    SelectTab { pane: pane_grid::Pane, tab_index: usize },
-    AddTab { pane: pane_grid::Pane },
-    CloseTab { pane: pane_grid::Pane, tab_index: usize },
+    SelectTab {
+        pane: pane_grid::Pane,
+        tab_index: usize,
+    },
+    AddTab {
+        pane: pane_grid::Pane,
+    },
+    CloseTab {
+        pane: pane_grid::Pane,
+        tab_index: usize,
+    },
     // Tab drag between panes (drag active tab from path header)
-    TabDragStart { pane: pane_grid::Pane, tab_index: usize },
-    TabDragFromHeader { pane: pane_grid::Pane },
-    TabDropOnPane { target_pane: pane_grid::Pane },
+    TabDragStart {
+        pane: pane_grid::Pane,
+        tab_index: usize,
+    },
+    TabDragFromHeader {
+        pane: pane_grid::Pane,
+    },
+    TabDropOnPane {
+        target_pane: pane_grid::Pane,
+    },
     TabDragCancel,
     // File panel actions
-    SelectEntry { pane: pane_grid::Pane, entry_index: usize },
-    ActivateEntry { pane: pane_grid::Pane, entry_index: usize },
+    SelectEntry {
+        pane: pane_grid::Pane,
+        entry_index: usize,
+    },
+    ActivateEntry {
+        pane: pane_grid::Pane,
+        entry_index: usize,
+    },
     // Pane grid events
     PaneClicked(pane_grid::Pane),
     PaneDragged(pane_grid::DragEvent),
@@ -360,11 +383,17 @@ impl App {
                         if self.command_line.starts_with("cd ") {
                             let path = self.command_line[3..].trim();
                             if path.starts_with('/') {
-                                // Absolute path - navigate directly
+                                // Absolute path - navigate directly if exact match exists
                                 let abs_path = std::path::PathBuf::from(path);
                                 if abs_path.is_dir() {
                                     if let Some(c) = self.active_tab_container_mut() {
                                         c.active_panel_mut().navigate_to(abs_path);
+                                    }
+                                } else {
+                                    // Path doesn't exist exactly - enter selected folder
+                                    // (incremental search already navigated to parent and selected match)
+                                    if let Some(c) = self.active_tab_container_mut() {
+                                        c.active_panel_mut().enter_selected();
                                     }
                                 }
                             } else {
@@ -446,7 +475,9 @@ impl App {
                 }
             }
             // Cancel drag if mouse released outside drop zones
-            Message::EventOccurred(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))) => {
+            Message::EventOccurred(Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))) => {
                 // If still dragging when release happens here, it means we're outside drop zones
                 // The drop zones handle their own releases via on_release
                 // This is a fallback - cancel the drag
@@ -470,11 +501,37 @@ impl App {
             return;
         }
 
-        let search_term = self.command_line[3..].trim().to_string();
+        let path_str = self.command_line[3..].trim().to_string();
 
-        if !search_term.is_empty() {
+        if path_str.is_empty() {
+            return;
+        }
+
+        if path_str.starts_with('/') {
+            // Absolute path: navigate to parent and search for last component
+            let path = std::path::PathBuf::from(&path_str);
+            if let Some(parent) = path.parent() {
+                if parent.is_dir() {
+                    // Navigate to parent directory
+                    if let Some(container) = self.active_tab_container_mut() {
+                        let panel = container.active_panel_mut();
+                        if panel.current_dir != parent {
+                            panel.navigate_to(parent.to_path_buf());
+                        }
+                        // Search for the last component
+                        if let Some(file_name) = path.file_name() {
+                            let search = file_name.to_string_lossy().to_string();
+                            if !search.is_empty() {
+                                panel.jump_to_folder(&search);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Relative path: search in current directory
             if let Some(container) = self.active_tab_container_mut() {
-                container.active_panel_mut().jump_to_folder(&search_term);
+                container.active_panel_mut().jump_to_folder(&path_str);
             }
         }
     }
@@ -572,51 +629,49 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let pane_grid_view = pane_grid::PaneGrid::new(&self.panes, |pane, tab_container, _is_maximized| {
-            let is_focused = pane == self.focus_pane;
-            let current_path = tab_container.active_panel().current_dir.to_string_lossy().to_string();
+        let pane_grid_view =
+            pane_grid::PaneGrid::new(&self.panes, |pane, tab_container, _is_maximized| {
+                let is_focused = pane == self.focus_pane;
+                let current_path = tab_container
+                    .active_panel()
+                    .current_dir
+                    .to_string_lossy()
+                    .to_string();
 
-            // Path header - drag from here to move active tab to other pane
-            let path_header_content = container(
-                row![
-                    text("≡ ").size(16),
-                    text(current_path).size(15),
-                ]
-            )
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(move |_theme| {
-                let bg = if is_focused {
-                    iced::Color::from_rgb(0.2, 0.25, 0.4)
-                } else {
-                    iced::Color::from_rgb(0.15, 0.15, 0.2)
-                };
-                container::Style {
-                    background: Some(bg.into()),
-                    ..Default::default()
-                }
-            });
+                // Path header - drag from here to move active tab to other pane
+                let path_header_content =
+                    container(row![text("≡ ").size(16), text(current_path).size(15),])
+                        .padding([6, 8])
+                        .width(Length::Fill)
+                        .style(move |_theme| {
+                            let bg = if is_focused {
+                                iced::Color::from_rgb(0.2, 0.25, 0.4)
+                            } else {
+                                iced::Color::from_rgb(0.15, 0.15, 0.2)
+                            };
+                            container::Style {
+                                background: Some(bg.into()),
+                                ..Default::default()
+                            }
+                        });
 
-            // Wrap path header in mouse_area to start tab drag and receive drops
-            let path_header = mouse_area(path_header_content)
-                .on_press(Message::TabDragFromHeader { pane })
-                .on_release(Message::TabDropOnPane { target_pane: pane });
+                // Wrap path header in mouse_area to start tab drag and receive drops
+                let path_header = mouse_area(path_header_content)
+                    .on_press(Message::TabDragFromHeader { pane })
+                    .on_release(Message::TabDropOnPane { target_pane: pane });
 
-            // Full content: path header + tabs + file list
-            let full_content = column![
-                path_header,
-                view_tab_container(tab_container, pane),
-            ]
+                // Full content: path header + tabs + file list
+                let full_content = column![path_header, view_tab_container(tab_container, pane),]
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+
+                pane_grid::Content::new(full_content)
+            })
+            .on_click(Message::PaneClicked)
+            .on_resize(10, Message::PaneResized)
+            .spacing(2)
             .width(Length::Fill)
             .height(Length::Fill);
-
-            pane_grid::Content::new(full_content)
-        })
-        .on_click(Message::PaneClicked)
-        .on_resize(10, Message::PaneResized)
-        .spacing(2)
-        .width(Length::Fill)
-        .height(Length::Fill);
 
         let command_line = self.view_command_line();
         // Terminal hidden for now until async PTY reading is implemented
@@ -636,18 +691,13 @@ impl App {
         if let Some(ref dragging) = self.dragging_tab {
             // Path header (same as real panel)
             let current_path = dragging.panel.current_dir.to_string_lossy().to_string();
-            let header = container(
-                row![
-                    text("≡ ").size(16),
-                    text(current_path).size(15),
-                ]
-            )
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(iced::Color::from_rgb(0.2, 0.25, 0.4).into()),
-                ..Default::default()
-            });
+            let header = container(row![text("≡ ").size(16), text(current_path).size(15),])
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(|_theme| container::Style {
+                    background: Some(iced::Color::from_rgb(0.2, 0.25, 0.4).into()),
+                    ..Default::default()
+                });
 
             // Render the actual panel view (same as the real panel)
             let panel_view = view_panel_with_pane(&dragging.panel, dragging.source_pane);
@@ -661,7 +711,7 @@ impl App {
             let drag_indicator = container(
                 column![header, panel_view]
                     .width(Length::Fill)
-                    .height(Length::Fill)
+                    .height(Length::Fill),
             )
             .width(Length::Fixed(panel_width))
             .height(Length::Fixed(panel_height))
@@ -681,10 +731,7 @@ impl App {
 
             let positioned = column![
                 Space::new().height(Length::Fixed(y_pos)),
-                row![
-                    Space::new().width(Length::Fixed(x_pos)),
-                    drag_indicator,
-                ]
+                row![Space::new().width(Length::Fixed(x_pos)), drag_indicator,]
             ];
 
             stack![main_content, positioned].into()
@@ -695,7 +742,11 @@ impl App {
 
     fn view_command_line(&self) -> Element<'_, Message> {
         let prompt = "> ";
-        let cursor = if self.focus == Focus::Panel { "▌" } else { "" };
+        let cursor = if self.focus == Focus::Panel {
+            "▌"
+        } else {
+            ""
+        };
         let display_text = format!("{}{}{}", prompt, self.command_line, cursor);
 
         container(text(display_text).size(15).font(iced::Font::MONOSPACE))
@@ -715,18 +766,17 @@ impl App {
 
     fn view_status_bar(&self) -> Element<'_, Message> {
         let focus_info = match self.focus {
-            Focus::Panel => {
-                self.active_tab_container_ref()
-                    .and_then(|c| c.active_panel().current_entry())
-                    .map(|e| {
-                        if e.is_dir() {
-                            format!("{} <DIR>", e.name())
-                        } else {
-                            format!("{} ({})", e.name(), e.size_display())
-                        }
-                    })
-                    .unwrap_or_default()
-            }
+            Focus::Panel => self
+                .active_tab_container_ref()
+                .and_then(|c| c.active_panel().current_entry())
+                .map(|e| {
+                    if e.is_dir() {
+                        format!("{} <DIR>", e.name())
+                    } else {
+                        format!("{} ({})", e.name(), e.size_display())
+                    }
+                })
+                .unwrap_or_default(),
             Focus::Terminal => "[TERMINAL]".to_string(),
         };
 
