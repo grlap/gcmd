@@ -155,7 +155,79 @@ impl App {
         Task::none()
     }
 
-    /// Create a scroll task to make cursor visible in the active panel
+    /// Calculate visible rows based on window height
+    fn visible_rows(&self) -> usize {
+        let row_height = 21.0;
+        // Chrome: path header(32) + tab bar(26) + command line(27) + status bar(26) + borders(6)
+        let chrome_height = 120.0;
+        let available_height = (self.window_size.height - chrome_height).max(row_height);
+        // Subtract 1 to account for partial row visibility at edges
+        ((available_height / row_height) as usize).saturating_sub(1)
+    }
+
+    /// Scroll only if cursor is outside visible range, then center it
+    /// Uses scroll_offset to track the first visible row
+    fn scroll_if_cursor_not_visible(&mut self) -> Task<Message> {
+        let visible_rows = self.visible_rows();
+
+        if let Some(container) = self.active_tab_container_mut() {
+            let panel = container.active_panel_mut();
+            let cursor = panel.cursor;
+            let total = panel.entries.len();
+
+            if total == 0 {
+                return Task::none();
+            }
+
+            // scroll_offset tracks the first visible row
+            // Update it to follow cursor movement when cursor is near edges
+            // This keeps our tracking in sync even without actual scroll events
+
+            // If cursor moved above visible area, adjust scroll_offset
+            if cursor < panel.scroll_offset {
+                panel.scroll_offset = cursor;
+            }
+            // If cursor moved below visible area, adjust scroll_offset
+            else if cursor >= panel.scroll_offset + visible_rows {
+                panel.scroll_offset = cursor.saturating_sub(visible_rows - 1);
+            }
+
+            let first_visible = panel.scroll_offset;
+            let last_visible = panel.scroll_offset + visible_rows.saturating_sub(1);
+
+            // Check if cursor is comfortably within visible range (not at edges)
+            // Use 2 row margin to ensure cursor is fully visible, not partially cut off
+            if cursor > first_visible + 1 && cursor + 1 < last_visible {
+                // Cursor is comfortably visible, no scroll needed
+                return Task::none();
+            }
+
+            // Cursor is at edge or outside - scroll to center it
+            let half_visible = visible_rows / 2;
+            let scroll_to_row = cursor.saturating_sub(half_visible);
+            let max_scroll_row = total.saturating_sub(visible_rows);
+            let target_row = scroll_to_row.min(max_scroll_row);
+
+            // Update scroll_offset to track new position
+            panel.scroll_offset = target_row;
+
+            // Convert to ratio (0.0 to 1.0)
+            let ratio = if max_scroll_row > 0 {
+                target_row as f32 / max_scroll_row as f32
+            } else {
+                0.0
+            };
+
+            let scrollable_id = panel.scrollable_id.clone();
+            return iced::widget::operation::snap_to(
+                scrollable_id,
+                scrollable::RelativeOffset { x: 0.0, y: ratio },
+            );
+        }
+        Task::none()
+    }
+
+    /// Always scroll to center cursor (used for page up/down, tab switch)
     fn scroll_to_cursor(&self) -> Task<Message> {
         if let Some(container) = self.active_tab_container_ref() {
             let panel = container.active_panel();
@@ -164,8 +236,19 @@ impl App {
             if total == 0 {
                 return Task::none();
             }
-            // Calculate relative position (0.0 to 1.0)
-            let ratio = cursor as f32 / total.saturating_sub(1).max(1) as f32;
+
+            let visible_rows = self.visible_rows();
+            let half_visible = visible_rows / 2;
+            let scroll_to_row = cursor.saturating_sub(half_visible);
+            let max_scroll_row = total.saturating_sub(visible_rows);
+            let target_row = scroll_to_row.min(max_scroll_row);
+
+            let ratio = if max_scroll_row > 0 {
+                target_row as f32 / max_scroll_row as f32
+            } else {
+                0.0
+            };
+
             return iced::widget::operation::snap_to(
                 panel.scrollable_id.clone(),
                 scrollable::RelativeOffset { x: 0.0, y: ratio },
@@ -355,15 +438,13 @@ impl App {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_up();
                         }
-                        // Only scroll if cursor went out of visible range
-                        return self.scroll_if_needed();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Named(Named::ArrowDown) => {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().move_down();
                         }
-                        // Only scroll if cursor went out of visible range
-                        return self.scroll_if_needed();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Named(Named::ArrowLeft) => {
                         // Page up - move by visible rows
