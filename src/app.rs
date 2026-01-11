@@ -293,26 +293,31 @@ impl App {
             // Tab drag between panes
             Message::TabDragStart { pane, tab_index } => {
                 if let Some(container) = self.panes.get(pane) {
-                    if let Some(panel) = container.tabs().get(tab_index) {
-                        self.dragging_tab = Some(DraggingTab {
-                            source_pane: pane,
-                            tab_index,
-                            panel: panel.clone(),
-                            mouse_pos: Point::ORIGIN,
-                        });
+                    // Only allow drag if there's more than one tab
+                    if container.tab_count() > 1 {
+                        if let Some(panel) = container.tabs().get(tab_index) {
+                            self.dragging_tab = Some(DraggingTab {
+                                source_pane: pane,
+                                tab_index,
+                                panel: panel.clone(),
+                                mouse_pos: Point::ORIGIN,
+                            });
+                        }
                     }
                 }
             }
             Message::TabDragFromHeader { pane } => {
-                // Drag the active tab from path header
+                // Drag the active tab from path header - only if there's more than one tab
                 if let Some(container) = self.panes.get(pane) {
-                    let tab_index = container.active_tab_index();
-                    self.dragging_tab = Some(DraggingTab {
-                        source_pane: pane,
-                        tab_index,
-                        panel: container.active_panel().clone(),
-                        mouse_pos: Point::ORIGIN,
-                    });
+                    if container.tab_count() > 1 {
+                        let tab_index = container.active_tab_index();
+                        self.dragging_tab = Some(DraggingTab {
+                            source_pane: pane,
+                            tab_index,
+                            panel: container.active_panel().clone(),
+                            mouse_pos: Point::ORIGIN,
+                        });
+                    }
                 }
             }
             Message::TabDropOnPane { target_pane } => {
@@ -710,6 +715,52 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // Check if we're dragging and calculate which pane should highlight based on 10% overlap
+        let drop_target_pane: Option<pane_grid::Pane> = if let Some(ref dragging) = self.dragging_tab
+        {
+            // Calculate drag indicator bounds
+            let panel_width = (self.window_size.width - 4.0) / 2.0;
+            let max_x = (self.window_size.width - panel_width).max(0.0);
+            let indicator_x = (dragging.mouse_pos.x + 20.0).clamp(0.0, max_x);
+            let indicator_right = indicator_x + panel_width;
+
+            // Get pane positions (assuming 50/50 split with 2px spacing)
+            let pane_ids: Vec<pane_grid::Pane> =
+                self.panes.iter().map(|(pane, _)| *pane).collect();
+            let mid_x = self.window_size.width / 2.0;
+
+            // Check overlap with each pane (10% of indicator width = panel_width * 0.1)
+            let min_overlap = panel_width * 0.1;
+
+            let mut target = None;
+            for (idx, &pane) in pane_ids.iter().enumerate() {
+                // Skip source pane
+                if pane == dragging.source_pane {
+                    continue;
+                }
+
+                // Calculate pane bounds (left pane = idx 0, right pane = idx 1)
+                let (pane_left, pane_right) = if idx == 0 {
+                    (0.0, mid_x - 1.0)
+                } else {
+                    (mid_x + 1.0, self.window_size.width)
+                };
+
+                // Calculate overlap
+                let overlap_left = indicator_x.max(pane_left);
+                let overlap_right = indicator_right.min(pane_right);
+                let overlap = (overlap_right - overlap_left).max(0.0);
+
+                if overlap >= min_overlap {
+                    target = Some(pane);
+                    break;
+                }
+            }
+            target
+        } else {
+            None
+        };
+
         let pane_grid_view =
             pane_grid::PaneGrid::new(&self.panes, |pane, tab_container, _is_maximized| {
                 let is_focused = pane == self.focus_pane;
@@ -718,6 +769,9 @@ impl App {
                     .current_dir
                     .to_string_lossy()
                     .to_string();
+
+                // Check if this pane is the drop target based on 10% overlap calculation
+                let is_drop_target = drop_target_pane.is_some_and(|target| target == pane);
 
                 // Path header - drag from here to move active tab to other pane
                 let path_header_content =
@@ -742,9 +796,36 @@ impl App {
                     .on_release(Message::TabDropOnPane { target_pane: pane });
 
                 // Full content: path header + tabs + file list
-                let full_content = column![path_header, view_tab_container(tab_container, pane),]
+                let panel_content = view_tab_container(tab_container, pane);
+
+                // Build full content column
+                let content_column = column![path_header, panel_content]
                     .width(Length::Fill)
                     .height(Length::Fill);
+
+                // Wrap content with drop target indicator and mouse_area when dragging
+                let full_content: Element<'_, Message> = if is_drop_target {
+                    let indicator = container(content_column)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|_theme| container::Style {
+                            background: Some(
+                                iced::Color::from_rgba(0.2, 0.5, 0.3, 0.15).into(),
+                            ),
+                            border: iced::Border {
+                                color: iced::Color::from_rgb(0.3, 0.8, 0.4),
+                                width: 4.0,
+                                radius: 4.0.into(),
+                            },
+                            ..Default::default()
+                        });
+                    // Wrap entire drop target in mouse_area to capture drop
+                    mouse_area(indicator)
+                        .on_release(Message::TabDropOnPane { target_pane: pane })
+                        .into()
+                } else {
+                    content_column.into()
+                };
 
                 pane_grid::Content::new(full_content)
             })
