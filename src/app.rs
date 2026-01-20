@@ -463,7 +463,21 @@ impl App {
                     keyboard::Key::Named(Named::Enter) => {
                         if self.command_line.starts_with("cd ") {
                             let path = self.command_line[3..].trim().to_string();
-                            if self.is_absolute_path(&path) {
+                            if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
+                                // Home directory path
+                                if let Some(home) = dirs::home_dir() {
+                                    let resolved = if path == "~" {
+                                        home
+                                    } else {
+                                        home.join(&path[2..])
+                                    };
+                                    if resolved.is_dir() {
+                                        if let Some(c) = self.active_tab_container_mut() {
+                                            c.active_panel_mut().navigate_to(resolved);
+                                        }
+                                    }
+                                }
+                            } else if self.is_absolute_path(&path) {
                                 // Absolute path - navigate directly
                                 let abs_path = self.resolve_absolute_path(&path);
                                 if abs_path.is_dir() {
@@ -538,16 +552,47 @@ impl App {
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Space) => {
-                        // Space key is Named, not Character
-                        self.command_line.push(' ');
-                        self.search_from_command_line();
+                        if self.command_line.is_empty() {
+                            // Toggle selection when command line is empty
+                            if let Some(c) = self.active_tab_container_mut() {
+                                c.active_panel_mut().toggle_selection();
+                            }
+                        } else {
+                            // Add space to command line
+                            self.command_line.push(' ');
+                            self.search_from_command_line();
+                        }
                         return self.scroll_to_cursor();
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
                         // Append character to command line
                         // iced sends lowercase even with shift - convert if shift is pressed
                         let char_to_add = if modifiers.shift() {
-                            c.as_str().to_uppercase()
+                            // Handle shift+key for special characters
+                            match c.as_str() {
+                                ";" => ":".to_string(),
+                                "`" => "~".to_string(),
+                                "1" => "!".to_string(),
+                                "2" => "@".to_string(),
+                                "3" => "#".to_string(),
+                                "4" => "$".to_string(),
+                                "5" => "%".to_string(),
+                                "6" => "^".to_string(),
+                                "7" => "&".to_string(),
+                                "8" => "*".to_string(),
+                                "9" => "(".to_string(),
+                                "0" => ")".to_string(),
+                                "-" => "_".to_string(),
+                                "=" => "+".to_string(),
+                                "[" => "{".to_string(),
+                                "]" => "}".to_string(),
+                                "\\" => "|".to_string(),
+                                "'" => "\"".to_string(),
+                                "," => "<".to_string(),
+                                "." => ">".to_string(),
+                                "/" => "?".to_string(),
+                                _ => c.as_str().to_uppercase(),
+                            }
                         } else {
                             c.as_str().to_string()
                         };
@@ -744,6 +789,11 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // Calculate panel width for filename truncation
+        // Each pane gets roughly half the window width minus spacing
+        let pane_count = self.panes.iter().count() as f32;
+        let panel_width = (self.window_size.width - 10.0) / pane_count;
+
         let pane_grid_view =
             pane_grid::PaneGrid::new(&self.panes, |pane, tab_container, _is_maximized| {
                 let is_focused = pane == self.focus_pane;
@@ -776,9 +826,10 @@ impl App {
                     .on_release(Message::TabDropOnPane { target_pane: pane });
 
                 // Full content: path header + tabs + file list
-                let full_content = column![path_header, view_tab_container(tab_container, pane),]
-                    .width(Length::Fill)
-                    .height(Length::Fill);
+                let full_content =
+                    column![path_header, view_tab_container(tab_container, pane, panel_width),]
+                        .width(Length::Fill)
+                        .height(Length::Fill);
 
                 pane_grid::Content::new(full_content)
             })
@@ -814,14 +865,15 @@ impl App {
                     ..Default::default()
                 });
 
-            // Render the actual panel view (same as the real panel)
-            let panel_view = view_panel_with_pane(&dragging.panel, dragging.source_pane);
-
             // Combined panel - size calculated from actual window size
             // Panel width = (window_width - spacing) / 2
             // Panel height = window_height - terminal_height(~100) - status_bar(~30) - path_header(~30) - tab_bar(~30)
             let panel_width = (self.window_size.width - 4.0) / 2.0;
             let panel_height = self.window_size.height - 160.0;
+
+            // Render the actual panel view (same as the real panel)
+            let panel_view =
+                view_panel_with_pane(&dragging.panel, dragging.source_pane, panel_width);
 
             let drag_indicator = container(
                 column![header, panel_view]

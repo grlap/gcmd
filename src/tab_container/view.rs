@@ -8,9 +8,10 @@ use crate::folder_panel::view::view_panel_with_pane;
 pub fn view_tab_container(
     container_widget: &TabContainer,
     pane: pane_grid::Pane,
+    panel_width: f32,
 ) -> Element<'_, Message> {
     let tab_bar = view_tab_bar(container_widget, pane);
-    let panel_content = view_panel_with_pane(container_widget.active_panel(), pane);
+    let panel_content = view_panel_with_pane(container_widget.active_panel(), pane, panel_width);
 
     // Wrap panel content in mouse_area to receive tab drops
     let panel_drop_zone =
