@@ -446,14 +446,14 @@ impl App {
                         }
                         return self.scroll_if_cursor_not_visible();
                     }
-                    keyboard::Key::Named(Named::ArrowLeft) => {
+                    keyboard::Key::Named(Named::ArrowLeft | Named::PageUp) => {
                         // Page up - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().page_up();
                         }
                         return self.scroll_to_cursor();
                     }
-                    keyboard::Key::Named(Named::ArrowRight) => {
+                    keyboard::Key::Named(Named::ArrowRight | Named::PageDown) => {
                         // Page down - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().page_down();
@@ -462,25 +462,34 @@ impl App {
                     }
                     keyboard::Key::Named(Named::Enter) => {
                         if self.command_line.starts_with("cd ") {
-                            let path = self.command_line[3..].trim();
-                            if path.starts_with('/') {
-                                // Absolute path - navigate directly if exact match exists
-                                let abs_path = std::path::PathBuf::from(path);
+                            let path = self.command_line[3..].trim().to_string();
+                            if self.is_absolute_path(&path) {
+                                // Absolute path - navigate directly
+                                let abs_path = self.resolve_absolute_path(&path);
                                 if abs_path.is_dir() {
                                     if let Some(c) = self.active_tab_container_mut() {
                                         c.active_panel_mut().navigate_to(abs_path);
                                     }
-                                } else {
-                                    // Path doesn't exist exactly - enter selected folder
-                                    // (incremental search already navigated to parent and selected match)
-                                    if let Some(c) = self.active_tab_container_mut() {
-                                        c.active_panel_mut().enter_selected();
-                                    }
                                 }
-                            } else {
-                                // Relative path - enter selected folder
+                                // If path doesn't exist, just clear command line (ignore)
+                            } else if !path.is_empty() {
+                                // Relative path - only enter if selected entry matches
                                 if let Some(c) = self.active_tab_container_mut() {
-                                    c.active_panel_mut().enter_selected();
+                                    let panel = c.active_panel_mut();
+                                    // Check if current entry name starts with the typed path
+                                    let should_enter = panel
+                                        .current_entry()
+                                        .map(|e| {
+                                            e.is_dir
+                                                && e.name
+                                                    .to_lowercase()
+                                                    .starts_with(&path.to_lowercase())
+                                        })
+                                        .unwrap_or(false);
+                                    if should_enter {
+                                        panel.enter_selected();
+                                    }
+                                    // If no match, just clear command line (ignore)
                                 }
                             }
                             self.command_line.clear();
@@ -575,8 +584,51 @@ impl App {
         Task::none()
     }
 
+    /// Check if a path is absolute (works on both Unix and Windows)
+    fn is_absolute_path(&self, path: &str) -> bool {
+        // Unix absolute path
+        if path.starts_with('/') {
+            return true;
+        }
+        // Windows absolute paths: C:\, D:\, etc. or just \ for current drive root
+        if path.starts_with('\\') {
+            return true;
+        }
+        // Windows drive letter path: C:\, D:/, etc.
+        if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+            return true;
+        }
+        false
+    }
+
+    /// Resolve an absolute path, handling Windows drive-relative paths like \
+    fn resolve_absolute_path(&self, path: &str) -> std::path::PathBuf {
+        // Windows: \ means root of current drive
+        if path == "\\" || path == "/" {
+            if let Some(container) = self.active_tab_container_ref() {
+                let current = &container.active_panel().current_dir;
+                // Get drive root (e.g., C:\)
+                if let Some(prefix) = current.components().next() {
+                    return std::path::PathBuf::from(prefix.as_os_str()).join("\\");
+                }
+            }
+        }
+        // Windows: \foo means current_drive:\foo
+        if path.starts_with('\\') && !path.starts_with("\\\\") {
+            if let Some(container) = self.active_tab_container_ref() {
+                let current = &container.active_panel().current_dir;
+                if let Some(prefix) = current.components().next() {
+                    let drive = prefix.as_os_str().to_string_lossy();
+                    return std::path::PathBuf::from(format!("{}{}", drive, path));
+                }
+            }
+        }
+        std::path::PathBuf::from(path)
+    }
+
     /// Search for entries matching command line input
-    /// Only triggers after user types "cd " - jumps to folders only
+    /// Only triggers after user types "cd " - jumps cursor to matching folders
+    /// Does NOT navigate - that happens on Enter
     fn search_from_command_line(&mut self) {
         if !self.command_line.starts_with("cd ") {
             return;
@@ -588,28 +640,10 @@ impl App {
             return;
         }
 
-        if path_str.starts_with('/') {
-            // Absolute path: navigate to parent and search for last component
-            let path = std::path::PathBuf::from(&path_str);
-            if let Some(parent) = path.parent() {
-                if parent.is_dir() {
-                    // Navigate to parent directory
-                    if let Some(container) = self.active_tab_container_mut() {
-                        let panel = container.active_panel_mut();
-                        if panel.current_dir != parent {
-                            panel.navigate_to(parent.to_path_buf());
-                        }
-                        // Search for the last component
-                        if let Some(file_name) = path.file_name() {
-                            let search = file_name.to_string_lossy().to_string();
-                            if !search.is_empty() {
-                                panel.jump_to_folder(&search);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
+        // For incremental search, we only move the cursor to matching entries
+        // in the current directory. Actual navigation happens on Enter.
+        // Don't do incremental search for absolute paths - just wait for Enter.
+        if !self.is_absolute_path(&path_str) {
             // Relative path: search in current directory
             if let Some(container) = self.active_tab_container_mut() {
                 container.active_panel_mut().jump_to_folder(&path_str);
