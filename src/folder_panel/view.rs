@@ -4,25 +4,17 @@ use iced::{Element, Length};
 use super::model::{FileEntry, FolderPanel};
 use crate::app::Message;
 use crate::panel::{Panel, PanelEntry};
+use crate::text_utils::{max_chars_for_width, truncate};
 
-/// Truncate a string to fit within max_chars, adding ellipsis if needed
-fn truncate_name(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
-        name.to_string()
-    } else {
-        let truncated: String = name.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    }
-}
+const ENTRY_FONT_SIZE: f32 = 15.0;
 
 /// Calculate max filename characters based on available panel width
-/// Name column gets 5/10 of the width, font is ~9px per char at size 15
+/// Name column gets 5/10 of the width
 fn calc_max_name_chars(panel_width: f32) -> usize {
     let name_column_width = panel_width * 0.5; // FillPortion(5) out of 10
-    let char_width = 9.0; // Approximate width of monospace char at size 15
     let padding = 20.0; // Account for icon, padding, spacing
     let available = (name_column_width - padding).max(50.0);
-    (available / char_width) as usize
+    max_chars_for_width(available, ENTRY_FONT_SIZE)
 }
 
 /// View panel with pane information for mouse events
@@ -262,7 +254,7 @@ fn view_entry(
     let icon = if entry.is_dir() { "/" } else { " " };
     // Truncate long filenames to prevent overflow into other columns
     // 28 chars fits comfortably in dual-pane layout at 1200px window
-    let truncated_name = truncate_name(entry.name(), 28);
+    let truncated_name = truncate(entry.name(), 28);
     let name_display = format!("{}{}", icon, truncated_name);
 
     let entry_row = row![
@@ -341,7 +333,7 @@ fn view_entry_with_pane(
 
     let icon = if entry.is_dir() { "/" } else { " " };
     // Truncate long filenames based on calculated max chars for panel width
-    let truncated_name = truncate_name(entry.name(), max_name_chars);
+    let truncated_name = truncate(entry.name(), max_name_chars);
     let name_display = format!("{}{}", icon, truncated_name);
 
     let entry_row = row![

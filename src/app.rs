@@ -12,6 +12,7 @@ use crate::tab_container::TabContainer;
 use crate::tab_container::view_tab_container;
 use crate::terminal_panel::view::view_terminal;
 use crate::terminal_panel::{TerminalKey, TerminalPanel};
+use crate::text_utils::{max_chars_for_width, truncate};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -535,7 +536,7 @@ impl App {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().toggle_selection();
                         }
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Character(ref c) if c.as_str() == "r" && modifiers.control() => {
                         // Refresh all tabs in all panes
@@ -557,12 +558,13 @@ impl App {
                             if let Some(c) = self.active_tab_container_mut() {
                                 c.active_panel_mut().toggle_selection();
                             }
+                            return self.scroll_if_cursor_not_visible();
                         } else {
                             // Add space to command line
                             self.command_line.push(' ');
                             self.search_from_command_line();
+                            return self.scroll_to_cursor();
                         }
-                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
                         // Append character to command line
@@ -934,22 +936,31 @@ impl App {
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
+        const STATUS_FONT_SIZE: f32 = 14.0;
+        let help = "Tab:Switch  Ctrl+T:NewTab  Ctrl+W:CloseTab  Ctrl+O:Terminal";
+
+        // Calculate max filename chars based on window width
+        // Help text is ~60 chars, leave room for size info (~15 chars), spacing
+        let help_width = 60.0 * 8.0; // ~8px per char at size 13
+        let size_width = 15.0 * 8.0;
+        let available = (self.window_size.width - help_width - size_width - 40.0).max(100.0);
+        let max_name_chars = max_chars_for_width(available, STATUS_FONT_SIZE);
+
         let focus_info = match self.focus {
             Focus::Panel => self
                 .active_tab_container_ref()
                 .and_then(|c| c.active_panel().current_entry())
                 .map(|e| {
+                    let truncated = truncate(e.name(), max_name_chars);
                     if e.is_dir() {
-                        format!("{} <DIR>", e.name())
+                        format!("{} <DIR>", truncated)
                     } else {
-                        format!("{} ({})", e.name(), e.size_display())
+                        format!("{} ({})", truncated, e.size_display())
                     }
                 })
                 .unwrap_or_default(),
             Focus::Terminal => "[TERMINAL]".to_string(),
         };
-
-        let help = "Tab:Switch  Ctrl+T:NewTab  Ctrl+W:CloseTab  Ctrl+O:Terminal  Drag:Rearrange";
 
         container(
             row![
@@ -959,6 +970,7 @@ impl App {
             .spacing(20),
         )
         .width(Length::Fill)
+        .height(Length::Fixed(26.0))
         .padding(4)
         .style(|_theme| container::Style {
             background: Some(iced::Color::from_rgb(0.1, 0.1, 0.15).into()),
