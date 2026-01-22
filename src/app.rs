@@ -5,6 +5,8 @@ use iced::{
     Element, Event, Length, Point, Size, Subscription, Task, Theme, event, keyboard, mouse,
 };
 
+use crate::file_viewer::FileViewer;
+use crate::file_viewer::view_file_viewer;
 use crate::folder_panel::FolderPanel;
 use crate::folder_panel::view::view_panel_with_pane;
 use crate::panel::{Panel, PanelEntry};
@@ -73,6 +75,7 @@ pub struct App {
     dragging_tab: Option<DraggingTab>,
     window_size: Size,
     command_line: String,
+    file_viewer: Option<FileViewer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -80,6 +83,7 @@ pub enum Focus {
     #[default]
     Panel,
     Terminal,
+    FileViewer,
 }
 
 impl Default for App {
@@ -105,6 +109,7 @@ impl Default for App {
             dragging_tab: None,
             window_size: Size::new(1200.0, 800.0), // Default, will be updated on resize
             command_line: String::new(),
+            file_viewer: None,
         }
     }
 }
@@ -358,8 +363,13 @@ impl App {
                 modifiers,
                 ..
             })) => {
-                // Escape cancels drag, clears command line, or returns focus to panels
+                // Escape cancels drag, closes viewer, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
+                    if self.file_viewer.is_some() {
+                        self.file_viewer = None;
+                        self.focus = Focus::Panel;
+                        return Task::none();
+                    }
                     if self.dragging_tab.is_some() {
                         self.dragging_tab = None;
                         return Task::none();
@@ -370,6 +380,28 @@ impl App {
                     }
                     if self.focus == Focus::Terminal {
                         self.set_focus_to_pane(self.focus_pane);
+                    }
+                    return Task::none();
+                }
+
+                // F3 opens/closes file viewer
+                if key == keyboard::Key::Named(Named::F3) {
+                    if self.file_viewer.is_some() {
+                        // Close viewer
+                        self.file_viewer = None;
+                        self.focus = Focus::Panel;
+                    } else if self.focus == Focus::Panel {
+                        // Open viewer for selected file
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                if !entry.is_dir() {
+                                    let visible_lines = self.visible_rows();
+                                    self.file_viewer =
+                                        Some(FileViewer::new(entry.path.clone(), visible_lines));
+                                    self.focus = Focus::FileViewer;
+                                }
+                            }
+                        }
                     }
                     return Task::none();
                 }
@@ -426,6 +458,22 @@ impl App {
                 // Route to terminal if focused
                 if self.focus == Focus::Terminal {
                     self.handle_terminal_key(&key, &modifiers);
+                    return Task::none();
+                }
+
+                // Route to file viewer if focused
+                if self.focus == Focus::FileViewer {
+                    if let Some(ref mut viewer) = self.file_viewer {
+                        match key {
+                            keyboard::Key::Named(Named::ArrowUp) => viewer.scroll_up(1),
+                            keyboard::Key::Named(Named::ArrowDown) => viewer.scroll_down(1),
+                            keyboard::Key::Named(Named::PageUp) => viewer.page_up(),
+                            keyboard::Key::Named(Named::PageDown) => viewer.page_down(),
+                            keyboard::Key::Named(Named::Home) => viewer.scroll_to_top(),
+                            keyboard::Key::Named(Named::End) => viewer.scroll_to_bottom(),
+                            _ => {}
+                        }
+                    }
                     return Task::none();
                 }
 
@@ -906,6 +954,25 @@ impl App {
             ];
 
             stack![main_content, positioned].into()
+        } else if let Some(ref viewer) = self.file_viewer {
+            // Show file viewer overlay
+            let viewer_content = view_file_viewer(viewer);
+            let viewer_width = self.window_size.width * 0.9;
+            let viewer_height = self.window_size.height * 0.85;
+
+            let viewer_container = container(viewer_content)
+                .width(Length::Fixed(viewer_width))
+                .height(Length::Fixed(viewer_height));
+
+            let x_offset = (self.window_size.width - viewer_width) / 2.0;
+            let y_offset = (self.window_size.height - viewer_height) / 2.0;
+
+            let positioned = column![
+                Space::new().height(Length::Fixed(y_offset)),
+                row![Space::new().width(Length::Fixed(x_offset)), viewer_container,]
+            ];
+
+            stack![main_content, positioned].into()
         } else {
             main_content
         }
@@ -960,6 +1027,11 @@ impl App {
                 })
                 .unwrap_or_default(),
             Focus::Terminal => "[TERMINAL]".to_string(),
+            Focus::FileViewer => self
+                .file_viewer
+                .as_ref()
+                .map(|v| format!("[VIEWER] {}", v.file_name()))
+                .unwrap_or_else(|| "[VIEWER]".to_string()),
         };
 
         container(

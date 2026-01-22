@@ -1,4 +1,5 @@
 mod app;
+mod file_viewer;
 mod folder_panel;
 mod panel;
 mod tab_container;
