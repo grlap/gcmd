@@ -504,6 +504,21 @@ impl App {
                     return Task::none();
                 }
 
+                // Ctrl+Enter copies name, Shift+Ctrl+Enter copies full path
+                if key == keyboard::Key::Named(Named::Enter) && modifiers.control() {
+                    if let Some(container) = self.active_tab_container_ref() {
+                        if let Some(entry) = container.active_panel().current_entry() {
+                            let text = if modifiers.shift() {
+                                entry.path.to_string_lossy().to_string()
+                            } else {
+                                entry.name.clone()
+                            };
+                            return iced::clipboard::write(text);
+                        }
+                    }
+                    return Task::none();
+                }
+
                 // Panel navigation - these need scroll updates
                 match key {
                     keyboard::Key::Named(Named::Tab) => {
