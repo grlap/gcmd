@@ -8,6 +8,7 @@ use iced::{
     Element, Event, Length, Point, Size, Subscription, Task, Theme, event, keyboard, mouse,
 };
 
+use crate::file_operation::{FileOpDialog, FileOpItem, FileOpKind, FileOpState, view_file_op_dialog};
 use crate::file_viewer::FileViewer;
 use crate::file_viewer::view_file_viewer;
 use crate::folder_panel::FolderPanel;
@@ -20,8 +21,23 @@ use crate::terminal_panel::{TerminalKey, TerminalPanel};
 use crate::text_utils::{max_chars_for_width, truncate};
 
 #[derive(Debug, Clone)]
+pub enum MenuAction {
+    Refresh,
+    Terminal,
+    NewTab,
+    CloseTab,
+    CopyName,
+    CopyPath,
+    OpenCmd,
+    Copy,
+    Move,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
     EventOccurred(Event),
+    MenuClicked(MenuAction),
     // Tab actions
     SelectTab {
         pane: pane_grid::Pane,
@@ -61,6 +77,8 @@ pub enum Message {
     PaneResized(pane_grid::ResizeEvent),
     // Terminal
     TerminalTick,
+    // File operations
+    FileOpFinished(Result<usize, String>),
 }
 
 /// Tracks a tab being dragged between panes
@@ -81,6 +99,7 @@ pub struct App {
     window_size: Size,
     command_line: String,
     file_viewer: Option<FileViewer>,
+    file_op_dialog: Option<FileOpDialog>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -89,6 +108,7 @@ pub enum Focus {
     Panel,
     Terminal,
     FileViewer,
+    FileOpDialog,
 }
 
 impl Default for App {
@@ -115,6 +135,7 @@ impl Default for App {
             window_size: Size::new(1200.0, 800.0), // Default, will be updated on resize
             command_line: String::new(),
             file_viewer: None,
+            file_op_dialog: None,
         }
     }
 }
@@ -170,8 +191,8 @@ impl App {
     fn visible_rows(&self) -> usize {
         // Entry row: text size 15 (~19px with Fira Code) + row padding 2*2 = ~23px
         let row_height = 23.0;
-        // Chrome: path header(33) + tab bar(27) + panel border(4) + command line(30) + status bar(26)
-        let chrome_height = 120.0;
+        // Chrome: menu bar(22) + path header(33) + tab bar(27) + panel border(4) + command line(30) + status bar(26)
+        let chrome_height = 142.0;
         let available_height = (self.window_size.height - chrome_height).max(row_height);
         // Floor division already discards the partial row at the bottom
         (available_height / row_height) as usize
@@ -389,8 +410,12 @@ impl App {
                 modifiers,
                 ..
             })) => {
-                // Escape cancels drag, closes viewer, clears command line, or returns focus to panels
+                // Escape cancels drag, closes viewer/dialog, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
+                    if self.file_op_dialog.is_some() {
+                        self.close_file_op_dialog();
+                        return Task::none();
+                    }
                     if self.file_viewer.is_some() {
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
@@ -432,6 +457,20 @@ impl App {
                         }
                     }
                     return self.restore_scroll_position();
+                }
+
+                // F5 copy, F6 move, F8 delete
+                if key == keyboard::Key::Named(Named::F5) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Copy);
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(Named::F6) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Move);
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(Named::F8) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Delete);
+                    return Task::none();
                 }
 
                 // Global shortcuts
@@ -500,6 +539,25 @@ impl App {
                             keyboard::Key::Named(Named::Home) => viewer.scroll_to_top(),
                             keyboard::Key::Named(Named::End) => viewer.scroll_to_bottom(),
                             _ => {}
+                        }
+                    }
+                    return Task::none();
+                }
+
+                // Route to file operation dialog if focused
+                if self.focus == Focus::FileOpDialog {
+                    if let Some(ref dialog) = self.file_op_dialog {
+                        match dialog.state {
+                            FileOpState::Confirming => {
+                                if key == keyboard::Key::Named(Named::Enter) {
+                                    return self.start_file_op();
+                                }
+                            }
+                            FileOpState::Completed { .. } | FileOpState::Error(_) => {
+                                if key == keyboard::Key::Named(Named::Enter) {
+                                    self.close_file_op_dialog();
+                                }
+                            }
                         }
                     }
                     return Task::none();
@@ -722,6 +780,87 @@ impl App {
             Message::EventOccurred(Event::Window(window::Event::Resized(size))) => {
                 self.window_size = size;
             }
+            Message::MenuClicked(action) => {
+                match action {
+                    MenuAction::Refresh => {
+                        for (_, container) in self.panes.iter_mut() {
+                            for panel in container.tabs_mut() {
+                                panel.refresh();
+                            }
+                        }
+                    }
+                    MenuAction::Terminal => {
+                        self.toggle_terminal_focus();
+                    }
+                    MenuAction::NewTab => {
+                        if let Some(container) = self.active_tab_container_mut() {
+                            container.add_tab();
+                        }
+                    }
+                    MenuAction::CloseTab => {
+                        if let Some(container) = self.active_tab_container_mut() {
+                            container.close_tab();
+                        }
+                    }
+                    MenuAction::CopyName => {
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                return iced::clipboard::write(entry.name.clone());
+                            }
+                        }
+                    }
+                    MenuAction::CopyPath => {
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                return iced::clipboard::write(
+                                    entry.path.to_string_lossy().to_string(),
+                                );
+                            }
+                        }
+                    }
+                    MenuAction::Copy => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Copy);
+                        }
+                    }
+                    MenuAction::Move => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Move);
+                        }
+                    }
+                    MenuAction::Delete => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Delete);
+                        }
+                    }
+                    MenuAction::OpenCmd => {
+                        let cwd = self
+                            .active_tab_container_ref()
+                            .map(|c| c.active_panel().current_dir.clone());
+                        let mut process = std::process::Command::new("cmd.exe");
+                        process.args(["/C", "start", "cmd.exe"]);
+                        process.creation_flags(0x08000000);
+                        if let Some(dir) = cwd {
+                            process.current_dir(dir);
+                        }
+                        let _ = process.spawn();
+                    }
+                }
+            }
+            Message::FileOpFinished(result) => {
+                match result {
+                    Ok(_) => {
+                        // Success — close dialog immediately
+                        self.close_file_op_dialog();
+                    }
+                    Err(e) => {
+                        // Error — show in dialog
+                        if let Some(ref mut dialog) = self.file_op_dialog {
+                            dialog.state = FileOpState::Error(e);
+                        }
+                    }
+                }
+            }
             Message::TerminalTick => {
                 self.terminal.poll_output();
             }
@@ -863,6 +1002,101 @@ impl App {
         }
     }
 
+    fn other_pane_dir(&self) -> Option<std::path::PathBuf> {
+        for (pane, container) in self.panes.iter() {
+            if *pane != self.focus_pane {
+                return Some(container.active_panel().current_dir.clone());
+            }
+        }
+        None
+    }
+
+    fn initiate_file_op(&mut self, kind: FileOpKind) {
+        let items_to_copy = if let Some(container) = self.active_tab_container_ref() {
+            let panel = container.active_panel();
+            let selected: Vec<FileOpItem> = panel
+                .entries
+                .iter()
+                .filter(|e| e.selected && e.name != "..")
+                .map(|e| FileOpItem {
+                    source: e.path.clone(),
+                    is_dir: e.is_dir,
+                    name: e.name.clone(),
+                })
+                .collect();
+
+            if selected.is_empty() {
+                panel
+                    .current_entry()
+                    .filter(|e| e.name() != "..")
+                    .map(|e| {
+                        vec![FileOpItem {
+                            source: e.path.clone(),
+                            is_dir: e.is_dir,
+                            name: e.name.clone(),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                selected
+            }
+        } else {
+            Vec::new()
+        };
+
+        if items_to_copy.is_empty() {
+            return;
+        }
+
+        if matches!(kind, FileOpKind::Delete) {
+            // Delete operates on the active panel — no destination needed
+            let placeholder = std::path::PathBuf::new();
+            self.file_op_dialog = Some(FileOpDialog::new(kind, items_to_copy, placeholder));
+            self.focus = Focus::FileOpDialog;
+        } else if let Some(dest) = self.other_pane_dir() {
+            self.file_op_dialog = Some(FileOpDialog::new(kind, items_to_copy, dest));
+            self.focus = Focus::FileOpDialog;
+        }
+    }
+
+    fn start_file_op(&mut self) -> Task<Message> {
+        if let Some(ref dialog) = self.file_op_dialog {
+            let items = dialog.items.clone();
+            let destination = dialog.destination.clone();
+            let kind = dialog.kind.clone();
+
+            return Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || match kind {
+                        FileOpKind::Copy => {
+                            crate::file_operation::model::copy_items(items, destination)
+                        }
+                        FileOpKind::Move => {
+                            crate::file_operation::model::move_items(items, destination)
+                        }
+                        FileOpKind::Delete => {
+                            crate::file_operation::model::delete_items(items)
+                        }
+                    })
+                    .await
+                    .map_err(|e| format!("Task failed: {}", e))?
+                },
+                Message::FileOpFinished,
+            );
+        }
+        Task::none()
+    }
+
+    fn close_file_op_dialog(&mut self) {
+        self.file_op_dialog = None;
+        self.focus = Focus::Panel;
+        for (_, container) in self.panes.iter_mut() {
+            for panel in container.tabs_mut() {
+                panel.refresh();
+            }
+        }
+    }
+
     fn handle_terminal_key(&mut self, key: &keyboard::Key, modifiers: &keyboard::Modifiers) {
         let terminal_key = match key {
             keyboard::Key::Named(Named::Enter) => Some(TerminalKey::Enter),
@@ -980,6 +1214,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
+        let menu_bar = self.view_menu_bar();
         let command_line = self.view_command_line();
         let status = self.view_status_bar();
 
@@ -1000,7 +1235,7 @@ impl App {
         let main_area: Element<'_, Message> =
             stack![pane_grid_view, terminal_overlay].into();
 
-        let content = column![main_area, command_line, status]
+        let content = column![menu_bar, main_area, command_line, status]
             .spacing(0)
             .height(Length::Fill);
 
@@ -1069,6 +1304,12 @@ impl App {
                 .height(Length::Fill);
 
             stack![main_content, viewer_container].into()
+        } else if let Some(ref dialog) = self.file_op_dialog {
+            let dialog_content = view_file_op_dialog(dialog);
+            let dialog_container = container(dialog_content)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            stack![main_content, dialog_container].into()
         } else {
             stack![main_content].into()
         }
@@ -1096,6 +1337,55 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    fn view_menu_bar(&self) -> Element<'_, Message> {
+        let menu_items: Vec<(&str, MenuAction)> = vec![
+            ("Files", MenuAction::Refresh),
+            ("Copy F5", MenuAction::Copy),
+            ("Move F6", MenuAction::Move),
+            ("Delete F8", MenuAction::Delete),
+            ("Copy Name", MenuAction::CopyName),
+            ("Copy Path", MenuAction::CopyPath),
+            ("New Tab", MenuAction::NewTab),
+            ("Close Tab", MenuAction::CloseTab),
+            ("Terminal", MenuAction::Terminal),
+            ("Cmd", MenuAction::OpenCmd),
+            ("Refresh", MenuAction::Refresh),
+        ];
+
+        let items: Vec<Element<'_, Message>> = menu_items
+            .into_iter()
+            .map(|(label, action)| {
+                let item = container(
+                    text(label)
+                        .size(13)
+                        .color(iced::Color::from_rgb(0.85, 0.85, 0.85)),
+                )
+                .padding([3, 10]);
+
+                mouse_area(item)
+                    .on_press(Message::MenuClicked(action))
+                    .into()
+            })
+            .collect();
+
+        container(
+            iced::widget::Row::with_children(items)
+                .spacing(0)
+                .height(Length::Fixed(22.0)),
+        )
+        .width(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Color::from_rgb(0.12, 0.12, 0.17).into()),
+            border: iced::Border {
+                color: iced::Color::from_rgb(0.2, 0.2, 0.25),
+                width: 0.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
@@ -1128,6 +1418,11 @@ impl App {
                 .as_ref()
                 .map(|v| format!("[VIEWER] {}", v.file_name()))
                 .unwrap_or_else(|| "[VIEWER]".to_string()),
+            Focus::FileOpDialog => self
+                .file_op_dialog
+                .as_ref()
+                .map(|d| format!("[{}]", d.kind.label().to_uppercase()))
+                .unwrap_or_default(),
         };
 
         container(

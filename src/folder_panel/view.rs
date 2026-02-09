@@ -118,6 +118,10 @@ impl Panel for FolderPanel {
                 self.current_dir = entry.path.clone();
                 self.refresh();
 
+                // New directory: start at top (refresh preserves old cursor/scroll)
+                self.cursor = 0;
+                self.scroll_offset = 0;
+
                 // If we went to parent, select the directory we came from
                 if let Some(name) = current_dir_name {
                     if let Some(idx) = self.entries.iter().position(|e| e.name == name) {
@@ -141,6 +145,10 @@ impl Panel for FolderPanel {
             self.current_dir = parent.to_path_buf();
             self.refresh();
 
+            // New directory: start at top (refresh preserves old cursor/scroll)
+            self.cursor = 0;
+            self.scroll_offset = 0;
+
             // Find and select the directory we just left
             if let Some(name) = current_dir_name {
                 if let Some(idx) = self.entries.iter().position(|e| e.name == name) {
@@ -163,8 +171,14 @@ impl Panel for FolderPanel {
 
     fn refresh(&mut self) {
         let was_active = self.is_active;
+        let old_cursor = self.cursor;
+        let old_scroll = self.scroll_offset;
+        let scrollable_id = self.scrollable_id.clone();
         *self = Self::new(self.current_dir.clone());
         self.is_active = was_active;
+        self.cursor = old_cursor.min(self.entries.len().saturating_sub(1));
+        self.scroll_offset = old_scroll;
+        self.scrollable_id = scrollable_id;
     }
 
     fn view(&self) -> Element<'_, Message> {
