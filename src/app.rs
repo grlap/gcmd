@@ -830,6 +830,15 @@ impl App {
 
     fn toggle_terminal_focus(&mut self) {
         if self.focus == Focus::Terminal {
+            // Sync panel to terminal's directory before leaving
+            if let Some(dir) = self.terminal.detect_cwd() {
+                if let Some(container) = self.active_tab_container_mut() {
+                    let panel = container.active_panel_mut();
+                    if panel.current_dir != dir {
+                        panel.navigate_to(dir);
+                    }
+                }
+            }
             // Return to last panel
             self.set_focus_to_pane(self.focus_pane);
         } else {

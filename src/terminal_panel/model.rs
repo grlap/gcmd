@@ -188,6 +188,30 @@ impl TerminalPanel {
         (pos.0, pos.1)
     }
 
+    /// Try to detect the shell's current directory from the prompt line.
+    /// On Windows cmd.exe, the prompt looks like "C:\Users\grzeg>"
+    pub fn detect_cwd(&self) -> Option<PathBuf> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let (cursor_row, _) = screen.cursor_position();
+
+        // Check the cursor row for a prompt pattern like "X:\...>"
+        let line = screen
+            .contents_between(cursor_row, 0, cursor_row, self.cols - 1)
+            .trim()
+            .to_string();
+
+        // cmd.exe prompt: "C:\some\path>"
+        if let Some(pos) = line.rfind('>') {
+            let candidate = &line[..pos];
+            let path = PathBuf::from(candidate);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
