@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use portable_pty::{CommandBuilder, PtyPair, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtyPair, PtySize, native_pty_system};
 use vt100::Parser;
 
 pub struct TerminalPanel {
     pty: Option<PtyPair>,
+    child: Option<Box<dyn Child + Send + Sync>>,
     writer: Option<Box<dyn Write + Send>>,
     parser: Arc<Mutex<Parser>>,
     output_rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -28,6 +29,7 @@ impl TerminalPanel {
 
         Self {
             pty: None,
+            child: None,
             writer: None,
             parser: Arc::new(Mutex::new(parser)),
             output_rx: None,
@@ -56,7 +58,8 @@ impl TerminalPanel {
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(&self.current_dir);
 
-        let _child = pair.slave.spawn_command(cmd)?;
+        let child = pair.slave.spawn_command(cmd)?;
+        self.child = Some(child);
 
         // Take the writer for reuse across send_input calls
         let writer = pair.master.take_writer()?;
@@ -86,14 +89,41 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Poll for new output from the background reader thread (non-blocking)
-    pub fn poll_output(&mut self) {
+    /// Poll for new output from the background reader thread (non-blocking).
+    /// Returns true if the shell process exited and was respawned.
+    pub fn poll_output(&mut self) -> bool {
+        // Read any available output
         if let Some(ref rx) = self.output_rx {
-            while let Ok(data) = rx.try_recv() {
-                let mut parser = self.parser.lock().unwrap();
-                parser.process(&data);
+            loop {
+                match rx.try_recv() {
+                    Ok(data) => {
+                        let mut parser = self.parser.lock().unwrap();
+                        parser.process(&data);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
             }
         }
+
+        // Check if child process has exited
+        let exited = if let Some(ref mut child) = self.child {
+            matches!(child.try_wait(), Ok(Some(_)))
+        } else {
+            false
+        };
+
+        if exited {
+            // Shell exited — clean up and respawn with fresh screen
+            self.child = None;
+            self.pty = None;
+            self.writer = None;
+            self.output_rx = None;
+            self.parser = Arc::new(Mutex::new(Parser::new(self.rows, self.cols, 1000)));
+            let _ = self.spawn_shell();
+            return true;
+        }
+        false
     }
 
     pub fn set_working_dir(&mut self, dir: PathBuf) {
