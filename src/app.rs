@@ -172,6 +172,40 @@ impl App {
         (available_height / row_height) as usize
     }
 
+    /// Snap scrollable to match the stored scroll_offset (restore scroll position)
+    fn restore_scroll_position(&self) -> Task<Message> {
+        if let Some(container) = self.active_tab_container_ref() {
+            let panel = container.active_panel();
+            let total = panel.entries.len();
+            let visible_rows = self.visible_rows();
+            let max_scroll_row = total.saturating_sub(visible_rows);
+
+            let ratio = if max_scroll_row > 0 {
+                panel.scroll_offset as f32 / max_scroll_row as f32
+            } else {
+                0.0
+            };
+
+            return iced::widget::operation::snap_to(
+                panel.scrollable_id.clone(),
+                scrollable::RelativeOffset { x: 0.0, y: ratio },
+            );
+        }
+        Task::none()
+    }
+
+    /// Calculate visible lines for file viewer based on its overlay dimensions
+    fn viewer_visible_lines(&self) -> usize {
+        // Viewer overlay is 85% of window height
+        let viewer_height = self.window_size.height * 0.85;
+        // Line height: text size 14 monospace ≈ 18px
+        let line_height = 18.0;
+        // Chrome: title bar(~26) + help bar(~24) + content padding(8) + border(4)
+        let chrome_height = 62.0;
+        let available = (viewer_height - chrome_height).max(line_height);
+        (available / line_height) as usize
+    }
+
     /// Scroll only if cursor is outside the visible range.
     /// Scrolls by the minimum amount to keep cursor visible (no centering).
     fn scroll_if_cursor_not_visible(&mut self) -> Task<Message> {
@@ -356,7 +390,7 @@ impl App {
                     if self.file_viewer.is_some() {
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
-                        return Task::none();
+                        return self.restore_scroll_position();
                     }
                     if self.dragging_tab.is_some() {
                         self.dragging_tab = None;
@@ -378,12 +412,13 @@ impl App {
                         // Close viewer
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
+                        return self.restore_scroll_position();
                     } else if self.focus == Focus::Panel {
                         // Open viewer for selected file
                         if let Some(container) = self.active_tab_container_ref() {
                             if let Some(entry) = container.active_panel().current_entry() {
                                 if !entry.is_dir() {
-                                    let visible_lines = self.visible_rows();
+                                    let visible_lines = self.viewer_visible_lines();
                                     self.file_viewer =
                                         Some(FileViewer::new(entry.path.clone(), visible_lines));
                                     self.focus = Focus::FileViewer;
