@@ -997,7 +997,7 @@ impl App {
 
             stack![main_content, positioned].into()
         } else {
-            main_content
+            stack![main_content].into()
         }
     }
 
