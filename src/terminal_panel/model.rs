@@ -139,6 +139,13 @@ impl TerminalPanel {
             .collect()
     }
 
+    pub fn cursor_position(&self) -> (u16, u16) {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let pos = screen.cursor_position();
+        (pos.0, pos.1)
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;

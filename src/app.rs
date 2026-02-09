@@ -855,6 +855,7 @@ impl App {
             keyboard::Key::Named(Named::Home) => Some(TerminalKey::Home),
             keyboard::Key::Named(Named::End) => Some(TerminalKey::End),
             keyboard::Key::Named(Named::Delete) => Some(TerminalKey::Delete),
+            keyboard::Key::Named(Named::Space) => Some(TerminalKey::Char(' ')),
             keyboard::Key::Character(c) => {
                 if modifiers.control() {
                     match c.as_str() {
