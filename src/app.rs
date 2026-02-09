@@ -194,15 +194,13 @@ impl App {
         Task::none()
     }
 
-    /// Calculate visible lines for file viewer based on its overlay dimensions
+    /// Calculate visible lines for file viewer based on full window height
     fn viewer_visible_lines(&self) -> usize {
-        // Viewer overlay is 85% of window height
-        let viewer_height = self.window_size.height * 0.85;
         // Line height: text size 14 monospace ≈ 18px
         let line_height = 18.0;
         // Chrome: title bar(~26) + help bar(~24) + content padding(8) + border(4)
         let chrome_height = 62.0;
-        let available = (viewer_height - chrome_height).max(line_height);
+        let available = (self.window_size.height - chrome_height).max(line_height);
         (available / line_height) as usize
     }
 
@@ -412,7 +410,6 @@ impl App {
                         // Close viewer
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
-                        return self.restore_scroll_position();
                     } else if self.focus == Focus::Panel {
                         // Open viewer for selected file
                         if let Some(container) = self.active_tab_container_ref() {
@@ -426,7 +423,7 @@ impl App {
                             }
                         }
                     }
-                    return Task::none();
+                    return self.restore_scroll_position();
                 }
 
                 // Global shortcuts
@@ -978,24 +975,14 @@ impl App {
 
             stack![main_content, positioned].into()
         } else if let Some(ref viewer) = self.file_viewer {
-            // Show file viewer overlay
+            // Show file viewer overlay (full screen)
             let viewer_content = view_file_viewer(viewer);
-            let viewer_width = self.window_size.width * 0.9;
-            let viewer_height = self.window_size.height * 0.85;
 
             let viewer_container = container(viewer_content)
-                .width(Length::Fixed(viewer_width))
-                .height(Length::Fixed(viewer_height));
+                .width(Length::Fill)
+                .height(Length::Fill);
 
-            let x_offset = (self.window_size.width - viewer_width) / 2.0;
-            let y_offset = (self.window_size.height - viewer_height) / 2.0;
-
-            let positioned = column![
-                Space::new().height(Length::Fixed(y_offset)),
-                row![Space::new().width(Length::Fixed(x_offset)), viewer_container,]
-            ];
-
-            stack![main_content, positioned].into()
+            stack![main_content, viewer_container].into()
         } else {
             stack![main_content].into()
         }
