@@ -842,13 +842,26 @@ impl App {
                         let cwd = self
                             .active_tab_container_ref()
                             .map(|c| c.active_panel().current_dir.clone());
-                        let mut process = std::process::Command::new("cmd.exe");
-                        process.args(["/C", "start", "cmd.exe"]);
-                        process.creation_flags(0x08000000);
-                        if let Some(dir) = cwd {
-                            process.current_dir(dir);
+                        #[cfg(windows)]
+                        {
+                            let mut process = std::process::Command::new("cmd.exe");
+                            process.args(["/C", "start", "cmd.exe"]);
+                            process.creation_flags(0x08000000);
+                            if let Some(dir) = cwd {
+                                process.current_dir(dir);
+                            }
+                            let _ = process.spawn();
                         }
-                        let _ = process.spawn();
+                        #[cfg(not(windows))]
+                        {
+                            let mut process = std::process::Command::new("open");
+                            process.arg("-a");
+                            process.arg("Terminal");
+                            if let Some(dir) = cwd {
+                                process.current_dir(dir);
+                            }
+                            let _ = process.spawn();
+                        }
                     }
                 }
             }
@@ -951,13 +964,26 @@ impl App {
 
         // "cmd" opens a new external terminal window
         if cmd.trim().eq_ignore_ascii_case("cmd") {
-            let mut process = std::process::Command::new("cmd.exe");
-            process.args(["/C", "start", "cmd.exe"]);
-            process.creation_flags(0x08000000); // CREATE_NO_WINDOW - hide the intermediate cmd
-            if let Some(dir) = cwd {
-                process.current_dir(dir);
+            #[cfg(windows)]
+            {
+                let mut process = std::process::Command::new("cmd.exe");
+                process.args(["/C", "start", "cmd.exe"]);
+                process.creation_flags(0x08000000); // CREATE_NO_WINDOW - hide the intermediate cmd
+                if let Some(dir) = &cwd {
+                    process.current_dir(dir);
+                }
+                let _ = process.spawn();
             }
-            let _ = process.spawn();
+            #[cfg(not(windows))]
+            {
+                let mut process = std::process::Command::new("open");
+                process.arg("-a");
+                process.arg("Terminal");
+                if let Some(dir) = &cwd {
+                    process.current_dir(dir);
+                }
+                let _ = process.spawn();
+            }
             return;
         }
 
