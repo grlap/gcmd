@@ -1,3 +1,6 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use iced::keyboard::key::Named;
 use iced::widget::{Space, column, container, mouse_area, pane_grid, row, scrollable, stack, text};
 use iced::window;
@@ -390,6 +393,7 @@ impl App {
                     if self.file_viewer.is_some() {
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
+                        self.command_line.clear();
                         return self.restore_scroll_position();
                     }
                     if self.dragging_tab.is_some() {
@@ -412,6 +416,7 @@ impl App {
                         // Close viewer
                         self.file_viewer = None;
                         self.focus = Focus::Panel;
+                        self.command_line.clear();
                     } else if self.focus == Focus::Panel {
                         // Open viewer for selected file
                         if let Some(container) = self.active_tab_container_ref() {
@@ -623,7 +628,7 @@ impl App {
                         // Delete last character from command line
                         self.command_line.pop();
                         self.search_from_command_line();
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Named(Named::Space) => {
                         if self.command_line.is_empty() {
@@ -636,7 +641,7 @@ impl App {
                             // Add space to command line
                             self.command_line.push(' ');
                             self.search_from_command_line();
-                            return self.scroll_to_cursor();
+                            return self.scroll_if_cursor_not_visible();
                         }
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
@@ -673,7 +678,7 @@ impl App {
                         };
                         self.command_line.push_str(&char_to_add);
                         self.search_from_command_line();
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     _ => {}
                 }
@@ -775,21 +780,34 @@ impl App {
     }
 
     fn execute_command_line(&mut self) {
-        // Spawn shell if not running
+        let cmd = self.command_line.clone();
+        self.command_line.clear();
+
+        let cwd = self
+            .active_tab_container_ref()
+            .map(|c| c.active_panel().current_dir.clone());
+
+        // "cmd" opens a new external terminal window
+        if cmd.trim().eq_ignore_ascii_case("cmd") {
+            let mut process = std::process::Command::new("cmd.exe");
+            process.args(["/C", "start", "cmd.exe"]);
+            process.creation_flags(0x08000000); // CREATE_NO_WINDOW - hide the intermediate cmd
+            if let Some(dir) = cwd {
+                process.current_dir(dir);
+            }
+            let _ = process.spawn();
+            return;
+        }
+
+        // Everything else goes to the embedded PTY terminal
         if !self.terminal.is_running() {
             let _ = self.terminal.spawn_shell();
         }
-
-        // Set terminal working directory to current panel's directory
-        if let Some(container) = self.active_tab_container_ref() {
-            let current_dir = container.active_panel().current_dir.clone();
-            self.terminal.set_working_dir(current_dir);
+        if let Some(dir) = cwd {
+            self.terminal.set_working_dir(dir);
         }
-
-        // Send command to terminal
-        let cmd = format!("{}\n", self.command_line);
-        self.terminal.send_input(&cmd);
-        self.command_line.clear();
+        let input = format!("{}\n", cmd);
+        self.terminal.send_input(&input);
     }
 
     fn toggle_terminal_focus(&mut self) {
