@@ -1,3 +1,6 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use iced::keyboard::key::Named;
 use iced::widget::{Space, column, container, mouse_area, pane_grid, row, scrollable, stack, text};
 use iced::window;
@@ -5,6 +8,9 @@ use iced::{
     Element, Event, Length, Point, Size, Subscription, Task, Theme, event, keyboard, mouse,
 };
 
+use crate::file_operation::{FileOpDialog, FileOpItem, FileOpKind, FileOpState, view_file_op_dialog};
+use crate::file_viewer::FileViewer;
+use crate::file_viewer::view_file_viewer;
 use crate::folder_panel::FolderPanel;
 use crate::folder_panel::view::view_panel_with_pane;
 use crate::panel::{Panel, PanelEntry};
@@ -12,10 +18,26 @@ use crate::tab_container::TabContainer;
 use crate::tab_container::view_tab_container;
 use crate::terminal_panel::view::view_terminal;
 use crate::terminal_panel::{TerminalKey, TerminalPanel};
+use crate::text_utils::{max_chars_for_width, truncate};
+
+#[derive(Debug, Clone)]
+pub enum MenuAction {
+    Refresh,
+    Terminal,
+    NewTab,
+    CloseTab,
+    CopyName,
+    CopyPath,
+    OpenCmd,
+    Copy,
+    Move,
+    Delete,
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
     EventOccurred(Event),
+    MenuClicked(MenuAction),
     // Tab actions
     SelectTab {
         pane: pane_grid::Pane,
@@ -53,6 +75,10 @@ pub enum Message {
     PaneClicked(pane_grid::Pane),
     PaneDragged(pane_grid::DragEvent),
     PaneResized(pane_grid::ResizeEvent),
+    // Terminal
+    TerminalTick,
+    // File operations
+    FileOpFinished(Result<usize, String>),
 }
 
 /// Tracks a tab being dragged between panes
@@ -72,6 +98,8 @@ pub struct App {
     dragging_tab: Option<DraggingTab>,
     window_size: Size,
     command_line: String,
+    file_viewer: Option<FileViewer>,
+    file_op_dialog: Option<FileOpDialog>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -79,6 +107,8 @@ pub enum Focus {
     #[default]
     Panel,
     Terminal,
+    FileViewer,
+    FileOpDialog,
 }
 
 impl Default for App {
@@ -104,6 +134,8 @@ impl Default for App {
             dragging_tab: None,
             window_size: Size::new(1200.0, 800.0), // Default, will be updated on resize
             command_line: String::new(),
+            file_viewer: None,
+            file_op_dialog: None,
         }
     }
 }
@@ -157,16 +189,49 @@ impl App {
 
     /// Calculate visible rows based on window height
     fn visible_rows(&self) -> usize {
-        let row_height = 21.0;
-        // Chrome: path header(32) + tab bar(26) + command line(27) + status bar(26) + borders(6)
-        let chrome_height = 120.0;
+        // Entry row: text size 15 (~19px with Fira Code) + row padding 2*2 = ~23px
+        let row_height = 23.0;
+        // Chrome: menu bar(22) + path header(33) + tab bar(27) + panel border(4) + command line(30) + status bar(26)
+        let chrome_height = 142.0;
         let available_height = (self.window_size.height - chrome_height).max(row_height);
-        // Subtract 1 to account for partial row visibility at edges
-        ((available_height / row_height) as usize).saturating_sub(1)
+        // Floor division already discards the partial row at the bottom
+        (available_height / row_height) as usize
     }
 
-    /// Scroll only if cursor is outside visible range, then center it
-    /// Uses scroll_offset to track the first visible row
+    /// Snap scrollable to match the stored scroll_offset (restore scroll position)
+    fn restore_scroll_position(&self) -> Task<Message> {
+        if let Some(container) = self.active_tab_container_ref() {
+            let panel = container.active_panel();
+            let total = panel.entries.len();
+            let visible_rows = self.visible_rows();
+            let max_scroll_row = total.saturating_sub(visible_rows);
+
+            let ratio = if max_scroll_row > 0 {
+                panel.scroll_offset as f32 / max_scroll_row as f32
+            } else {
+                0.0
+            };
+
+            return iced::widget::operation::snap_to(
+                panel.scrollable_id.clone(),
+                scrollable::RelativeOffset { x: 0.0, y: ratio },
+            );
+        }
+        Task::none()
+    }
+
+    /// Calculate visible lines for file viewer based on full window height
+    fn viewer_visible_lines(&self) -> usize {
+        // Line height: text size 14 monospace ≈ 18px
+        let line_height = 18.0;
+        // Chrome: title bar(~26) + help bar(~24) + content padding(8) + border(4)
+        let chrome_height = 62.0;
+        let available = (self.window_size.height - chrome_height).max(line_height);
+        (available / line_height) as usize
+    }
+
+    /// Scroll only if cursor is outside the visible range.
+    /// Scrolls by the minimum amount to keep cursor visible (no centering).
     fn scroll_if_cursor_not_visible(&mut self) -> Task<Message> {
         let visible_rows = self.visible_rows();
 
@@ -179,9 +244,7 @@ impl App {
                 return Task::none();
             }
 
-            // scroll_offset tracks the first visible row
-            // Update it to follow cursor movement when cursor is near edges
-            // This keeps our tracking in sync even without actual scroll events
+            let old_offset = panel.scroll_offset;
 
             // If cursor moved above visible area, adjust scroll_offset
             if cursor < panel.scroll_offset {
@@ -192,28 +255,14 @@ impl App {
                 panel.scroll_offset = cursor.saturating_sub(visible_rows - 1);
             }
 
-            let first_visible = panel.scroll_offset;
-            let last_visible = panel.scroll_offset + visible_rows.saturating_sub(1);
-
-            // Check if cursor is comfortably within visible range (not at edges)
-            // Use 2 row margin to ensure cursor is fully visible, not partially cut off
-            if cursor > first_visible + 1 && cursor + 1 < last_visible {
-                // Cursor is comfortably visible, no scroll needed
+            // Only send a scroll command if offset actually changed
+            if panel.scroll_offset == old_offset {
                 return Task::none();
             }
 
-            // Cursor is at edge or outside - scroll to center it
-            let half_visible = visible_rows / 2;
-            let scroll_to_row = cursor.saturating_sub(half_visible);
             let max_scroll_row = total.saturating_sub(visible_rows);
-            let target_row = scroll_to_row.min(max_scroll_row);
-
-            // Update scroll_offset to track new position
-            panel.scroll_offset = target_row;
-
-            // Convert to ratio (0.0 to 1.0)
             let ratio = if max_scroll_row > 0 {
-                target_row as f32 / max_scroll_row as f32
+                panel.scroll_offset as f32 / max_scroll_row as f32
             } else {
                 0.0
             };
@@ -228,20 +277,23 @@ impl App {
     }
 
     /// Always scroll to center cursor (used for page up/down, tab switch)
-    fn scroll_to_cursor(&self) -> Task<Message> {
-        if let Some(container) = self.active_tab_container_ref() {
-            let panel = container.active_panel();
+    fn scroll_to_cursor(&mut self) -> Task<Message> {
+        let visible_rows = self.visible_rows();
+
+        if let Some(container) = self.active_tab_container_mut() {
+            let panel = container.active_panel_mut();
             let cursor = panel.cursor;
             let total = panel.entries.len();
             if total == 0 {
                 return Task::none();
             }
 
-            let visible_rows = self.visible_rows();
             let half_visible = visible_rows / 2;
             let scroll_to_row = cursor.saturating_sub(half_visible);
             let max_scroll_row = total.saturating_sub(visible_rows);
             let target_row = scroll_to_row.min(max_scroll_row);
+
+            panel.scroll_offset = target_row;
 
             let ratio = if max_scroll_row > 0 {
                 target_row as f32 / max_scroll_row as f32
@@ -354,6 +406,7 @@ impl App {
                     panel.set_cursor(entry_index);
                     panel.enter_selected();
                 }
+                self.sync_terminal_dir();
             }
 
             // Keyboard events
@@ -362,8 +415,18 @@ impl App {
                 modifiers,
                 ..
             })) => {
-                // Escape cancels drag, clears command line, or returns focus to panels
+                // Escape cancels drag, closes viewer/dialog, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
+                    if self.file_op_dialog.is_some() {
+                        self.close_file_op_dialog();
+                        return Task::none();
+                    }
+                    if self.file_viewer.is_some() {
+                        self.file_viewer = None;
+                        self.focus = Focus::Panel;
+                        self.command_line.clear();
+                        return self.restore_scroll_position();
+                    }
                     if self.dragging_tab.is_some() {
                         self.dragging_tab = None;
                         return Task::none();
@@ -375,6 +438,43 @@ impl App {
                     if self.focus == Focus::Terminal {
                         self.set_focus_to_pane(self.focus_pane);
                     }
+                    return Task::none();
+                }
+
+                // F3 opens/closes file viewer
+                if key == keyboard::Key::Named(Named::F3) {
+                    if self.file_viewer.is_some() {
+                        // Close viewer
+                        self.file_viewer = None;
+                        self.focus = Focus::Panel;
+                        self.command_line.clear();
+                    } else if self.focus == Focus::Panel {
+                        // Open viewer for selected file
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                if !entry.is_dir() {
+                                    let visible_lines = self.viewer_visible_lines();
+                                    self.file_viewer =
+                                        Some(FileViewer::new(entry.path.clone(), visible_lines));
+                                    self.focus = Focus::FileViewer;
+                                }
+                            }
+                        }
+                    }
+                    return self.restore_scroll_position();
+                }
+
+                // F5 copy, F6 move, F8 delete
+                if key == keyboard::Key::Named(Named::F5) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Copy);
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(Named::F6) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Move);
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(Named::F8) && self.focus == Focus::Panel {
+                    self.initiate_file_op(FileOpKind::Delete);
                     return Task::none();
                 }
 
@@ -433,6 +533,56 @@ impl App {
                     return Task::none();
                 }
 
+                // Route to file viewer if focused
+                if self.focus == Focus::FileViewer {
+                    if let Some(ref mut viewer) = self.file_viewer {
+                        match key {
+                            keyboard::Key::Named(Named::ArrowUp) => viewer.scroll_up(1),
+                            keyboard::Key::Named(Named::ArrowDown) => viewer.scroll_down(1),
+                            keyboard::Key::Named(Named::PageUp) => viewer.page_up(),
+                            keyboard::Key::Named(Named::PageDown) => viewer.page_down(),
+                            keyboard::Key::Named(Named::Home) => viewer.scroll_to_top(),
+                            keyboard::Key::Named(Named::End) => viewer.scroll_to_bottom(),
+                            _ => {}
+                        }
+                    }
+                    return Task::none();
+                }
+
+                // Route to file operation dialog if focused
+                if self.focus == Focus::FileOpDialog {
+                    if let Some(ref dialog) = self.file_op_dialog {
+                        match dialog.state {
+                            FileOpState::Confirming => {
+                                if key == keyboard::Key::Named(Named::Enter) {
+                                    return self.start_file_op();
+                                }
+                            }
+                            FileOpState::Completed { .. } | FileOpState::Error(_) => {
+                                if key == keyboard::Key::Named(Named::Enter) {
+                                    self.close_file_op_dialog();
+                                }
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
+
+                // Ctrl+Enter copies name, Shift+Ctrl+Enter copies full path
+                if key == keyboard::Key::Named(Named::Enter) && modifiers.control() {
+                    if let Some(container) = self.active_tab_container_ref() {
+                        if let Some(entry) = container.active_panel().current_entry() {
+                            let text = if modifiers.shift() {
+                                entry.path.to_string_lossy().to_string()
+                            } else {
+                                entry.name.clone()
+                            };
+                            return iced::clipboard::write(text);
+                        }
+                    }
+                    return Task::none();
+                }
+
                 // Panel navigation - these need scroll updates
                 match key {
                     keyboard::Key::Named(Named::Tab) => {
@@ -451,14 +601,14 @@ impl App {
                         }
                         return self.scroll_if_cursor_not_visible();
                     }
-                    keyboard::Key::Named(Named::ArrowLeft) => {
+                    keyboard::Key::Named(Named::ArrowLeft | Named::PageUp) => {
                         // Page up - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().page_up();
                         }
                         return self.scroll_to_cursor();
                     }
-                    keyboard::Key::Named(Named::ArrowRight) => {
+                    keyboard::Key::Named(Named::ArrowRight | Named::PageDown) => {
                         // Page down - move by visible rows
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().page_down();
@@ -467,28 +617,52 @@ impl App {
                     }
                     keyboard::Key::Named(Named::Enter) => {
                         if self.command_line.starts_with("cd ") {
-                            let path = self.command_line[3..].trim();
-                            if path.starts_with('/') {
-                                // Absolute path - navigate directly if exact match exists
-                                let abs_path = std::path::PathBuf::from(path);
+                            let path = self.command_line[3..].trim().to_string();
+                            if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
+                                // Home directory path
+                                if let Some(home) = dirs::home_dir() {
+                                    let resolved = if path == "~" {
+                                        home
+                                    } else {
+                                        home.join(&path[2..])
+                                    };
+                                    if resolved.is_dir() {
+                                        if let Some(c) = self.active_tab_container_mut() {
+                                            c.active_panel_mut().navigate_to(resolved);
+                                        }
+                                    }
+                                }
+                            } else if self.is_absolute_path(&path) {
+                                // Absolute path - navigate directly
+                                let abs_path = self.resolve_absolute_path(&path);
                                 if abs_path.is_dir() {
                                     if let Some(c) = self.active_tab_container_mut() {
                                         c.active_panel_mut().navigate_to(abs_path);
                                     }
-                                } else {
-                                    // Path doesn't exist exactly - enter selected folder
-                                    // (incremental search already navigated to parent and selected match)
-                                    if let Some(c) = self.active_tab_container_mut() {
-                                        c.active_panel_mut().enter_selected();
-                                    }
                                 }
-                            } else {
-                                // Relative path - enter selected folder
+                                // If path doesn't exist, just clear command line (ignore)
+                            } else if !path.is_empty() {
+                                // Relative path - only enter if selected entry matches
                                 if let Some(c) = self.active_tab_container_mut() {
-                                    c.active_panel_mut().enter_selected();
+                                    let panel = c.active_panel_mut();
+                                    // Check if current entry name starts with the typed path
+                                    let should_enter = panel
+                                        .current_entry()
+                                        .map(|e| {
+                                            e.is_dir
+                                                && e.name
+                                                    .to_lowercase()
+                                                    .starts_with(&path.to_lowercase())
+                                        })
+                                        .unwrap_or(false);
+                                    if should_enter {
+                                        panel.enter_selected();
+                                    }
+                                    // If no match, just clear command line (ignore)
                                 }
                             }
                             self.command_line.clear();
+                            self.sync_terminal_dir();
                             return self.scroll_to_cursor();
                         }
                         if !self.command_line.is_empty() {
@@ -496,10 +670,14 @@ impl App {
                             self.execute_command_line();
                             return Task::none();
                         }
-                        if let Some(c) = self.active_tab_container_mut() {
-                            c.active_panel_mut().enter_selected();
+                        let navigated = self
+                            .active_tab_container_mut()
+                            .map(|c| c.active_panel_mut().enter_selected())
+                            .unwrap_or(false);
+                        if navigated {
+                            self.sync_terminal_dir();
+                            return self.scroll_to_cursor();
                         }
-                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Home) => {
                         if let Some(c) = self.active_tab_container_mut() {
@@ -517,7 +695,7 @@ impl App {
                         if let Some(c) = self.active_tab_container_mut() {
                             c.active_panel_mut().toggle_selection();
                         }
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Character(ref c) if c.as_str() == "r" && modifiers.control() => {
                         // Refresh all tabs in all panes
@@ -531,25 +709,57 @@ impl App {
                         // Delete last character from command line
                         self.command_line.pop();
                         self.search_from_command_line();
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     keyboard::Key::Named(Named::Space) => {
-                        // Space key is Named, not Character
-                        self.command_line.push(' ');
-                        self.search_from_command_line();
-                        return self.scroll_to_cursor();
+                        if self.command_line.is_empty() {
+                            // Toggle selection when command line is empty
+                            if let Some(c) = self.active_tab_container_mut() {
+                                c.active_panel_mut().toggle_selection();
+                            }
+                            return self.scroll_if_cursor_not_visible();
+                        } else {
+                            // Add space to command line
+                            self.command_line.push(' ');
+                            self.search_from_command_line();
+                            return self.scroll_if_cursor_not_visible();
+                        }
                     }
                     keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
                         // Append character to command line
                         // iced sends lowercase even with shift - convert if shift is pressed
                         let char_to_add = if modifiers.shift() {
-                            c.as_str().to_uppercase()
+                            // Handle shift+key for special characters
+                            match c.as_str() {
+                                ";" => ":".to_string(),
+                                "`" => "~".to_string(),
+                                "1" => "!".to_string(),
+                                "2" => "@".to_string(),
+                                "3" => "#".to_string(),
+                                "4" => "$".to_string(),
+                                "5" => "%".to_string(),
+                                "6" => "^".to_string(),
+                                "7" => "&".to_string(),
+                                "8" => "*".to_string(),
+                                "9" => "(".to_string(),
+                                "0" => ")".to_string(),
+                                "-" => "_".to_string(),
+                                "=" => "+".to_string(),
+                                "[" => "{".to_string(),
+                                "]" => "}".to_string(),
+                                "\\" => "|".to_string(),
+                                "'" => "\"".to_string(),
+                                "," => "<".to_string(),
+                                "." => ">".to_string(),
+                                "/" => "?".to_string(),
+                                _ => c.as_str().to_uppercase(),
+                            }
                         } else {
                             c.as_str().to_string()
                         };
                         self.command_line.push_str(&char_to_add);
                         self.search_from_command_line();
-                        return self.scroll_to_cursor();
+                        return self.scroll_if_cursor_not_visible();
                     }
                     _ => {}
                 }
@@ -575,13 +785,140 @@ impl App {
             Message::EventOccurred(Event::Window(window::Event::Resized(size))) => {
                 self.window_size = size;
             }
+            Message::MenuClicked(action) => {
+                match action {
+                    MenuAction::Refresh => {
+                        for (_, container) in self.panes.iter_mut() {
+                            for panel in container.tabs_mut() {
+                                panel.refresh();
+                            }
+                        }
+                    }
+                    MenuAction::Terminal => {
+                        self.toggle_terminal_focus();
+                    }
+                    MenuAction::NewTab => {
+                        if let Some(container) = self.active_tab_container_mut() {
+                            container.add_tab();
+                        }
+                    }
+                    MenuAction::CloseTab => {
+                        if let Some(container) = self.active_tab_container_mut() {
+                            container.close_tab();
+                        }
+                    }
+                    MenuAction::CopyName => {
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                return iced::clipboard::write(entry.name.clone());
+                            }
+                        }
+                    }
+                    MenuAction::CopyPath => {
+                        if let Some(container) = self.active_tab_container_ref() {
+                            if let Some(entry) = container.active_panel().current_entry() {
+                                return iced::clipboard::write(
+                                    entry.path.to_string_lossy().to_string(),
+                                );
+                            }
+                        }
+                    }
+                    MenuAction::Copy => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Copy);
+                        }
+                    }
+                    MenuAction::Move => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Move);
+                        }
+                    }
+                    MenuAction::Delete => {
+                        if self.focus == Focus::Panel {
+                            self.initiate_file_op(FileOpKind::Delete);
+                        }
+                    }
+                    MenuAction::OpenCmd => {
+                        let cwd = self
+                            .active_tab_container_ref()
+                            .map(|c| c.active_panel().current_dir.clone());
+                        let mut process = std::process::Command::new("cmd.exe");
+                        process.args(["/C", "start", "cmd.exe"]);
+                        process.creation_flags(0x08000000);
+                        if let Some(dir) = cwd {
+                            process.current_dir(dir);
+                        }
+                        let _ = process.spawn();
+                    }
+                }
+            }
+            Message::FileOpFinished(result) => {
+                match result {
+                    Ok(_) => {
+                        // Success — close dialog immediately
+                        self.close_file_op_dialog();
+                    }
+                    Err(e) => {
+                        // Error — show in dialog
+                        if let Some(ref mut dialog) = self.file_op_dialog {
+                            dialog.state = FileOpState::Error(e);
+                        }
+                    }
+                }
+            }
+            Message::TerminalTick => {
+                self.terminal.poll_output();
+            }
             _ => {}
         }
         Task::none()
     }
 
+    /// Check if a path is absolute (works on both Unix and Windows)
+    fn is_absolute_path(&self, path: &str) -> bool {
+        // Unix absolute path
+        if path.starts_with('/') {
+            return true;
+        }
+        // Windows absolute paths: C:\, D:\, etc. or just \ for current drive root
+        if path.starts_with('\\') {
+            return true;
+        }
+        // Windows drive letter path: C:\, D:/, etc.
+        if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+            return true;
+        }
+        false
+    }
+
+    /// Resolve an absolute path, handling Windows drive-relative paths like \
+    fn resolve_absolute_path(&self, path: &str) -> std::path::PathBuf {
+        // Windows: \ means root of current drive
+        if path == "\\" || path == "/" {
+            if let Some(container) = self.active_tab_container_ref() {
+                let current = &container.active_panel().current_dir;
+                // Get drive root (e.g., C:\)
+                if let Some(prefix) = current.components().next() {
+                    return std::path::PathBuf::from(prefix.as_os_str()).join("\\");
+                }
+            }
+        }
+        // Windows: \foo means current_drive:\foo
+        if path.starts_with('\\') && !path.starts_with("\\\\") {
+            if let Some(container) = self.active_tab_container_ref() {
+                let current = &container.active_panel().current_dir;
+                if let Some(prefix) = current.components().next() {
+                    let drive = prefix.as_os_str().to_string_lossy();
+                    return std::path::PathBuf::from(format!("{}{}", drive, path));
+                }
+            }
+        }
+        std::path::PathBuf::from(path)
+    }
+
     /// Search for entries matching command line input
-    /// Only triggers after user types "cd " - jumps to folders only
+    /// Only triggers after user types "cd " - jumps cursor to matching folders
+    /// Does NOT navigate - that happens on Enter
     fn search_from_command_line(&mut self) {
         if !self.command_line.starts_with("cd ") {
             return;
@@ -593,28 +930,10 @@ impl App {
             return;
         }
 
-        if path_str.starts_with('/') {
-            // Absolute path: navigate to parent and search for last component
-            let path = std::path::PathBuf::from(&path_str);
-            if let Some(parent) = path.parent() {
-                if parent.is_dir() {
-                    // Navigate to parent directory
-                    if let Some(container) = self.active_tab_container_mut() {
-                        let panel = container.active_panel_mut();
-                        if panel.current_dir != parent {
-                            panel.navigate_to(parent.to_path_buf());
-                        }
-                        // Search for the last component
-                        if let Some(file_name) = path.file_name() {
-                            let search = file_name.to_string_lossy().to_string();
-                            if !search.is_empty() {
-                                panel.jump_to_folder(&search);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
+        // For incremental search, we only move the cursor to matching entries
+        // in the current directory. Actual navigation happens on Enter.
+        // Don't do incremental search for absolute paths - just wait for Enter.
+        if !self.is_absolute_path(&path_str) {
             // Relative path: search in current directory
             if let Some(container) = self.active_tab_container_mut() {
                 container.active_panel_mut().jump_to_folder(&path_str);
@@ -623,25 +942,47 @@ impl App {
     }
 
     fn execute_command_line(&mut self) {
-        // Spawn shell if not running
+        let cmd = self.command_line.clone();
+        self.command_line.clear();
+
+        let cwd = self
+            .active_tab_container_ref()
+            .map(|c| c.active_panel().current_dir.clone());
+
+        // "cmd" opens a new external terminal window
+        if cmd.trim().eq_ignore_ascii_case("cmd") {
+            let mut process = std::process::Command::new("cmd.exe");
+            process.args(["/C", "start", "cmd.exe"]);
+            process.creation_flags(0x08000000); // CREATE_NO_WINDOW - hide the intermediate cmd
+            if let Some(dir) = cwd {
+                process.current_dir(dir);
+            }
+            let _ = process.spawn();
+            return;
+        }
+
+        // Everything else goes to the embedded PTY terminal
         if !self.terminal.is_running() {
             let _ = self.terminal.spawn_shell();
         }
-
-        // Set terminal working directory to current panel's directory
-        if let Some(container) = self.active_tab_container_ref() {
-            let current_dir = container.active_panel().current_dir.clone();
-            self.terminal.set_working_dir(current_dir);
+        if let Some(dir) = cwd {
+            self.terminal.set_working_dir(dir);
         }
-
-        // Send command to terminal
-        let cmd = format!("{}\n", self.command_line);
-        self.terminal.send_input(&cmd);
-        self.command_line.clear();
+        let input = format!("{}\n", cmd);
+        self.terminal.send_input(&input);
     }
 
     fn toggle_terminal_focus(&mut self) {
         if self.focus == Focus::Terminal {
+            // Sync panel to terminal's directory before leaving
+            if let Some(dir) = self.terminal.detect_cwd() {
+                if let Some(container) = self.active_tab_container_mut() {
+                    let panel = container.active_panel_mut();
+                    if panel.current_dir != dir {
+                        panel.navigate_to(dir);
+                    }
+                }
+            }
             // Return to last panel
             self.set_focus_to_pane(self.focus_pane);
         } else {
@@ -654,6 +995,109 @@ impl App {
             // Start shell if not running
             if !self.terminal.is_running() {
                 let _ = self.terminal.spawn_shell();
+            }
+            self.sync_terminal_dir();
+        }
+    }
+
+    fn sync_terminal_dir(&mut self) {
+        if let Some(container) = self.active_tab_container_ref() {
+            let dir = container.active_panel().current_dir.clone();
+            self.terminal.set_working_dir(dir);
+        }
+    }
+
+    fn other_pane_dir(&self) -> Option<std::path::PathBuf> {
+        for (pane, container) in self.panes.iter() {
+            if *pane != self.focus_pane {
+                return Some(container.active_panel().current_dir.clone());
+            }
+        }
+        None
+    }
+
+    fn initiate_file_op(&mut self, kind: FileOpKind) {
+        let items_to_copy = if let Some(container) = self.active_tab_container_ref() {
+            let panel = container.active_panel();
+            let selected: Vec<FileOpItem> = panel
+                .entries
+                .iter()
+                .filter(|e| e.selected && e.name != "..")
+                .map(|e| FileOpItem {
+                    source: e.path.clone(),
+                    is_dir: e.is_dir,
+                    name: e.name.clone(),
+                })
+                .collect();
+
+            if selected.is_empty() {
+                panel
+                    .current_entry()
+                    .filter(|e| e.name() != "..")
+                    .map(|e| {
+                        vec![FileOpItem {
+                            source: e.path.clone(),
+                            is_dir: e.is_dir,
+                            name: e.name.clone(),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                selected
+            }
+        } else {
+            Vec::new()
+        };
+
+        if items_to_copy.is_empty() {
+            return;
+        }
+
+        if matches!(kind, FileOpKind::Delete) {
+            // Delete operates on the active panel — no destination needed
+            let placeholder = std::path::PathBuf::new();
+            self.file_op_dialog = Some(FileOpDialog::new(kind, items_to_copy, placeholder));
+            self.focus = Focus::FileOpDialog;
+        } else if let Some(dest) = self.other_pane_dir() {
+            self.file_op_dialog = Some(FileOpDialog::new(kind, items_to_copy, dest));
+            self.focus = Focus::FileOpDialog;
+        }
+    }
+
+    fn start_file_op(&mut self) -> Task<Message> {
+        if let Some(ref dialog) = self.file_op_dialog {
+            let items = dialog.items.clone();
+            let destination = dialog.destination.clone();
+            let kind = dialog.kind.clone();
+
+            return Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || match kind {
+                        FileOpKind::Copy => {
+                            crate::file_operation::model::copy_items(items, destination)
+                        }
+                        FileOpKind::Move => {
+                            crate::file_operation::model::move_items(items, destination)
+                        }
+                        FileOpKind::Delete => {
+                            crate::file_operation::model::delete_items(items)
+                        }
+                    })
+                    .await
+                    .map_err(|e| format!("Task failed: {}", e))?
+                },
+                Message::FileOpFinished,
+            );
+        }
+        Task::none()
+    }
+
+    fn close_file_op_dialog(&mut self) {
+        self.file_op_dialog = None;
+        self.focus = Focus::Panel;
+        for (_, container) in self.panes.iter_mut() {
+            for panel in container.tabs_mut() {
+                panel.refresh();
             }
         }
     }
@@ -670,6 +1114,7 @@ impl App {
             keyboard::Key::Named(Named::Home) => Some(TerminalKey::Home),
             keyboard::Key::Named(Named::End) => Some(TerminalKey::End),
             keyboard::Key::Named(Named::Delete) => Some(TerminalKey::Delete),
+            keyboard::Key::Named(Named::Space) => Some(TerminalKey::Char(' ')),
             keyboard::Key::Character(c) => {
                 if modifiers.control() {
                     match c.as_str() {
@@ -711,26 +1156,40 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        event::listen().map(Message::EventOccurred)
+        let events = event::listen().map(Message::EventOccurred);
+        if self.terminal.is_running() {
+            Subscription::batch([
+                events,
+                iced::time::every(std::time::Duration::from_millis(50))
+                    .map(|_| Message::TerminalTick),
+            ])
+        } else {
+            events
+        }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // Calculate panel width for filename truncation
+        // Each pane gets roughly half the window width minus spacing
+        let pane_count = self.panes.iter().count() as f32;
+        let panel_width = (self.window_size.width - 10.0) / pane_count;
+
         // Check if we're dragging and calculate which pane should highlight based on 10% overlap
         let drop_target_pane: Option<pane_grid::Pane> = if let Some(ref dragging) = self.dragging_tab
         {
             // Calculate drag indicator bounds
-            let panel_width = (self.window_size.width - 4.0) / 2.0;
-            let max_x = (self.window_size.width - panel_width).max(0.0);
+            let drag_panel_width = (self.window_size.width - 4.0) / 2.0;
+            let max_x = (self.window_size.width - drag_panel_width).max(0.0);
             let indicator_x = (dragging.mouse_pos.x + 20.0).clamp(0.0, max_x);
-            let indicator_right = indicator_x + panel_width;
+            let indicator_right = indicator_x + drag_panel_width;
 
             // Get pane positions (assuming 50/50 split with 2px spacing)
             let pane_ids: Vec<pane_grid::Pane> =
                 self.panes.iter().map(|(pane, _)| *pane).collect();
             let mid_x = self.window_size.width / 2.0;
 
-            // Check overlap with each pane (10% of indicator width = panel_width * 0.1)
-            let min_overlap = panel_width * 0.1;
+            // Check overlap with each pane (10% of indicator width = drag_panel_width * 0.1)
+            let min_overlap = drag_panel_width * 0.1;
 
             let mut target = None;
             for (idx, &pane) in pane_ids.iter().enumerate() {
@@ -796,7 +1255,7 @@ impl App {
                     .on_release(Message::TabDropOnPane { target_pane: pane });
 
                 // Full content: path header + tabs + file list
-                let panel_content = view_tab_container(tab_container, pane);
+                let panel_content = view_tab_container(tab_container, pane, panel_width);
 
                 // Build full content column
                 let content_column = column![path_header, panel_content]
@@ -835,12 +1294,28 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
+        let menu_bar = self.view_menu_bar();
         let command_line = self.view_command_line();
-        // Terminal hidden for now until async PTY reading is implemented
-        // let terminal = view_terminal(&self.terminal);
         let status = self.view_status_bar();
 
-        let content = column![pane_grid_view, command_line, status]
+        // Stack panels and terminal so panels widget tree is always stable (prevents scroll reset)
+        // Terminal overlays panels when focused; panels are always Fill so scrollable state is preserved
+        let terminal_height = if self.focus == Focus::Terminal {
+            Length::Fill
+        } else {
+            Length::Fixed(0.0)
+        };
+
+        let terminal_overlay: Element<'_, Message> = container(view_terminal(&self.terminal))
+            .width(Length::Fill)
+            .height(terminal_height)
+            .clip(true)
+            .into();
+
+        let main_area: Element<'_, Message> =
+            stack![pane_grid_view, terminal_overlay].into();
+
+        let content = column![menu_bar, main_area, command_line, status]
             .spacing(0)
             .height(Length::Fill);
 
@@ -861,14 +1336,15 @@ impl App {
                     ..Default::default()
                 });
 
-            // Render the actual panel view (same as the real panel)
-            let panel_view = view_panel_with_pane(&dragging.panel, dragging.source_pane);
-
             // Combined panel - size calculated from actual window size
             // Panel width = (window_width - spacing) / 2
             // Panel height = window_height - terminal_height(~100) - status_bar(~30) - path_header(~30) - tab_bar(~30)
             let panel_width = (self.window_size.width - 4.0) / 2.0;
             let panel_height = self.window_size.height - 160.0;
+
+            // Render the actual panel view (same as the real panel)
+            let panel_view =
+                view_panel_with_pane(&dragging.panel, dragging.source_pane, panel_width);
 
             let drag_indicator = container(
                 column![header, panel_view]
@@ -899,8 +1375,23 @@ impl App {
             ];
 
             stack![main_content, positioned].into()
+        } else if let Some(ref viewer) = self.file_viewer {
+            // Show file viewer overlay (full screen)
+            let viewer_content = view_file_viewer(viewer);
+
+            let viewer_container = container(viewer_content)
+                .width(Length::Fill)
+                .height(Length::Fill);
+
+            stack![main_content, viewer_container].into()
+        } else if let Some(ref dialog) = self.file_op_dialog {
+            let dialog_content = view_file_op_dialog(dialog);
+            let dialog_container = container(dialog_content)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            stack![main_content, dialog_container].into()
         } else {
-            main_content
+            stack![main_content].into()
         }
     }
 
@@ -928,23 +1419,91 @@ impl App {
             .into()
     }
 
+    fn view_menu_bar(&self) -> Element<'_, Message> {
+        let menu_items: Vec<(&str, MenuAction)> = vec![
+            ("Files", MenuAction::Refresh),
+            ("Copy F5", MenuAction::Copy),
+            ("Move F6", MenuAction::Move),
+            ("Delete F8", MenuAction::Delete),
+            ("Copy Name", MenuAction::CopyName),
+            ("Copy Path", MenuAction::CopyPath),
+            ("New Tab", MenuAction::NewTab),
+            ("Close Tab", MenuAction::CloseTab),
+            ("Terminal", MenuAction::Terminal),
+            ("Cmd", MenuAction::OpenCmd),
+            ("Refresh", MenuAction::Refresh),
+        ];
+
+        let items: Vec<Element<'_, Message>> = menu_items
+            .into_iter()
+            .map(|(label, action)| {
+                let item = container(
+                    text(label)
+                        .size(13)
+                        .color(iced::Color::from_rgb(0.85, 0.85, 0.85)),
+                )
+                .padding([3, 10]);
+
+                mouse_area(item)
+                    .on_press(Message::MenuClicked(action))
+                    .into()
+            })
+            .collect();
+
+        container(
+            iced::widget::Row::with_children(items)
+                .spacing(0)
+                .height(Length::Fixed(22.0)),
+        )
+        .width(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Color::from_rgb(0.12, 0.12, 0.17).into()),
+            border: iced::Border {
+                color: iced::Color::from_rgb(0.2, 0.2, 0.25),
+                width: 0.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+
     fn view_status_bar(&self) -> Element<'_, Message> {
+        const STATUS_FONT_SIZE: f32 = 14.0;
+        let help = "Tab:Switch  Ctrl+T:NewTab  Ctrl+W:CloseTab  Ctrl+O:Terminal";
+
+        // Calculate max filename chars based on window width
+        // Help text is ~60 chars, leave room for size info (~15 chars), spacing
+        let help_width = 60.0 * 8.0; // ~8px per char at size 13
+        let size_width = 15.0 * 8.0;
+        let available = (self.window_size.width - help_width - size_width - 40.0).max(100.0);
+        let max_name_chars = max_chars_for_width(available, STATUS_FONT_SIZE);
+
         let focus_info = match self.focus {
             Focus::Panel => self
                 .active_tab_container_ref()
                 .and_then(|c| c.active_panel().current_entry())
                 .map(|e| {
+                    let truncated = truncate(e.name(), max_name_chars);
                     if e.is_dir() {
-                        format!("{} <DIR>", e.name())
+                        format!("{} <DIR>", truncated)
                     } else {
-                        format!("{} ({})", e.name(), e.size_display())
+                        format!("{} ({})", truncated, e.size_display())
                     }
                 })
                 .unwrap_or_default(),
             Focus::Terminal => "[TERMINAL]".to_string(),
+            Focus::FileViewer => self
+                .file_viewer
+                .as_ref()
+                .map(|v| format!("[VIEWER] {}", v.file_name()))
+                .unwrap_or_else(|| "[VIEWER]".to_string()),
+            Focus::FileOpDialog => self
+                .file_op_dialog
+                .as_ref()
+                .map(|d| format!("[{}]", d.kind.label().to_uppercase()))
+                .unwrap_or_default(),
         };
-
-        let help = "Tab:Switch  Ctrl+T:NewTab  Ctrl+W:CloseTab  Ctrl+O:Terminal  Drag:Rearrange";
 
         container(
             row![
@@ -954,6 +1513,7 @@ impl App {
             .spacing(20),
         )
         .width(Length::Fill)
+        .height(Length::Fixed(26.0))
         .padding(4)
         .style(|_theme| container::Style {
             background: Some(iced::Color::from_rgb(0.1, 0.1, 0.15).into()),

@@ -4,11 +4,27 @@ use iced::{Element, Length};
 use super::model::{FileEntry, FolderPanel};
 use crate::app::Message;
 use crate::panel::{Panel, PanelEntry};
+use crate::text_utils::{max_chars_for_width, truncate};
+
+const ENTRY_FONT_SIZE: f32 = 15.0;
+
+/// Calculate max filename characters based on available panel width
+/// Name column gets 5/10 of the width
+fn calc_max_name_chars(panel_width: f32) -> usize {
+    let name_column_width = panel_width * 0.5; // FillPortion(5) out of 10
+    let padding = 20.0; // Account for icon, padding, spacing
+    let available = (name_column_width - padding).max(50.0);
+    max_chars_for_width(available, ENTRY_FONT_SIZE)
+}
 
 /// View panel with pane information for mouse events
-pub fn view_panel_with_pane(panel: &FolderPanel, pane: pane_grid::Pane) -> Element<'_, Message> {
+pub fn view_panel_with_pane(
+    panel: &FolderPanel,
+    pane: pane_grid::Pane,
+    panel_width: f32,
+) -> Element<'_, Message> {
     // Header is now in the pane_grid title bar, so just show entries
-    let entries = view_entries_with_pane(panel, pane);
+    let entries = view_entries_with_pane(panel, pane, panel_width);
 
     let panel_content = column![entries]
         .spacing(0)
@@ -102,6 +118,10 @@ impl Panel for FolderPanel {
                 self.current_dir = entry.path.clone();
                 self.refresh();
 
+                // New directory: start at top (refresh preserves old cursor/scroll)
+                self.cursor = 0;
+                self.scroll_offset = 0;
+
                 // If we went to parent, select the directory we came from
                 if let Some(name) = current_dir_name {
                     if let Some(idx) = self.entries.iter().position(|e| e.name == name) {
@@ -125,6 +145,10 @@ impl Panel for FolderPanel {
             self.current_dir = parent.to_path_buf();
             self.refresh();
 
+            // New directory: start at top (refresh preserves old cursor/scroll)
+            self.cursor = 0;
+            self.scroll_offset = 0;
+
             // Find and select the directory we just left
             if let Some(name) = current_dir_name {
                 if let Some(idx) = self.entries.iter().position(|e| e.name == name) {
@@ -147,8 +171,14 @@ impl Panel for FolderPanel {
 
     fn refresh(&mut self) {
         let was_active = self.is_active;
+        let old_cursor = self.cursor;
+        let old_scroll = self.scroll_offset;
+        let scrollable_id = self.scrollable_id.clone();
         *self = Self::new(self.current_dir.clone());
         self.is_active = was_active;
+        self.cursor = old_cursor.min(self.entries.len().saturating_sub(1));
+        self.scroll_offset = old_scroll;
+        self.scrollable_id = scrollable_id;
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -236,7 +266,10 @@ fn view_entry(
     };
 
     let icon = if entry.is_dir() { "/" } else { " " };
-    let name_display = format!("{}{}", icon, entry.name());
+    // Truncate long filenames to prevent overflow into other columns
+    // 28 chars fits comfortably in dual-pane layout at 1200px window
+    let truncated_name = truncate(entry.name(), 28);
+    let name_display = format!("{}{}", icon, truncated_name);
 
     let entry_row = row![
         text(name_display)
@@ -262,13 +295,18 @@ fn view_entry(
         .into()
 }
 
-fn view_entries_with_pane(panel: &FolderPanel, pane: pane_grid::Pane) -> Element<'_, Message> {
+fn view_entries_with_pane(
+    panel: &FolderPanel,
+    pane: pane_grid::Pane,
+    panel_width: f32,
+) -> Element<'_, Message> {
+    let max_chars = calc_max_name_chars(panel_width);
     let entries: Vec<Element<Message>> = panel
         .entries
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            view_entry_with_pane(entry, idx, idx == panel.cursor, panel.is_active, pane)
+            view_entry_with_pane(entry, idx, idx == panel.cursor, panel.is_active, pane, max_chars)
         })
         .collect();
 
@@ -289,6 +327,7 @@ fn view_entry_with_pane(
     is_cursor: bool,
     is_active_panel: bool,
     pane: pane_grid::Pane,
+    max_name_chars: usize,
 ) -> Element<'static, Message> {
     let name_color = if entry.is_dir() {
         iced::Color::from_rgb(0.4, 0.7, 1.0)
@@ -307,7 +346,9 @@ fn view_entry_with_pane(
     };
 
     let icon = if entry.is_dir() { "/" } else { " " };
-    let name_display = format!("{}{}", icon, entry.name());
+    // Truncate long filenames based on calculated max chars for panel width
+    let truncated_name = truncate(entry.name(), max_name_chars);
+    let name_display = format!("{}{}", icon, truncated_name);
 
     let entry_row = row![
         text(name_display)

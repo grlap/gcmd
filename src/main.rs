@@ -1,8 +1,11 @@
 mod app;
+mod file_operation;
+mod file_viewer;
 mod folder_panel;
 mod panel;
 mod tab_container;
 mod terminal_panel;
+mod text_utils;
 
 use app::{App, Message};
 use iced::{Element, Font, Subscription, Task, Theme};
