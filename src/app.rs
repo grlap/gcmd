@@ -583,10 +583,13 @@ impl App {
                             self.execute_command_line();
                             return Task::none();
                         }
-                        if let Some(c) = self.active_tab_container_mut() {
-                            c.active_panel_mut().enter_selected();
+                        let navigated = self
+                            .active_tab_container_mut()
+                            .map(|c| c.active_panel_mut().enter_selected())
+                            .unwrap_or(false);
+                        if navigated {
+                            return self.scroll_to_cursor();
                         }
-                        return self.scroll_to_cursor();
                     }
                     keyboard::Key::Named(Named::Home) => {
                         if let Some(c) = self.active_tab_container_mut() {
