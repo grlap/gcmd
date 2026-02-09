@@ -56,6 +56,8 @@ pub enum Message {
     PaneClicked(pane_grid::Pane),
     PaneDragged(pane_grid::DragEvent),
     PaneResized(pane_grid::ResizeEvent),
+    // Terminal
+    TerminalTick,
 }
 
 /// Tracks a tab being dragged between panes
@@ -697,6 +699,9 @@ impl App {
             Message::EventOccurred(Event::Window(window::Event::Resized(size))) => {
                 self.window_size = size;
             }
+            Message::TerminalTick => {
+                self.terminal.poll_output();
+            }
             _ => {}
         }
         Task::none()
@@ -858,7 +863,16 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        event::listen().map(Message::EventOccurred)
+        let events = event::listen().map(Message::EventOccurred);
+        if self.terminal.is_running() {
+            Subscription::batch([
+                events,
+                iced::time::every(std::time::Duration::from_millis(50))
+                    .map(|_| Message::TerminalTick),
+            ])
+        } else {
+            events
+        }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -913,11 +927,26 @@ impl App {
             .height(Length::Fill);
 
         let command_line = self.view_command_line();
-        // Terminal hidden for now until async PTY reading is implemented
-        // let terminal = view_terminal(&self.terminal);
         let status = self.view_status_bar();
 
-        let content = column![pane_grid_view, command_line, status]
+        // Stack panels and terminal so panels widget tree is always stable (prevents scroll reset)
+        // Terminal overlays panels when focused; panels are always Fill so scrollable state is preserved
+        let terminal_height = if self.focus == Focus::Terminal {
+            Length::Fill
+        } else {
+            Length::Fixed(0.0)
+        };
+
+        let terminal_overlay: Element<'_, Message> = container(view_terminal(&self.terminal))
+            .width(Length::Fill)
+            .height(terminal_height)
+            .clip(true)
+            .into();
+
+        let main_area: Element<'_, Message> =
+            stack![pane_grid_view, terminal_overlay].into();
+
+        let content = column![main_area, command_line, status]
             .spacing(0)
             .height(Length::Fill);
 

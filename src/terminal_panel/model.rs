@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{CommandBuilder, PtyPair, PtySize, native_pty_system};
@@ -7,9 +8,9 @@ use vt100::Parser;
 
 pub struct TerminalPanel {
     pty: Option<PtyPair>,
+    writer: Option<Box<dyn Write + Send>>,
     parser: Arc<Mutex<Parser>>,
-    output_buffer: Arc<Mutex<Vec<u8>>>,
-    input_buffer: String,
+    output_rx: Option<mpsc::Receiver<Vec<u8>>>,
     rows: u16,
     cols: u16,
     current_dir: PathBuf,
@@ -27,9 +28,9 @@ impl TerminalPanel {
 
         Self {
             pty: None,
+            writer: None,
             parser: Arc::new(Mutex::new(parser)),
-            output_buffer: Arc::new(Mutex::new(Vec::new())),
-            input_buffer: String::new(),
+            output_rx: None,
             rows,
             cols,
             current_dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
@@ -46,31 +47,63 @@ impl TerminalPanel {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        // Use platform-appropriate shell
+        let shell = if cfg!(windows) {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        };
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(&self.current_dir);
 
         let _child = pair.slave.spawn_command(cmd)?;
 
+        // Take the writer for reuse across send_input calls
+        let writer = pair.master.take_writer()?;
+        self.writer = Some(writer);
+
+        // Spawn background thread to read PTY output
+        let mut reader = pair.master.try_clone_reader()?;
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        self.output_rx = Some(rx);
         self.pty = Some(pair);
         Ok(())
     }
 
-    pub fn set_working_dir(&mut self, dir: PathBuf) {
-        self.current_dir = dir;
-        // Send cd command to terminal if running
-        if self.pty.is_some() {
-            let cd_cmd = format!("cd {:?}\n", self.current_dir);
-            self.send_input(&cd_cmd);
+    /// Poll for new output from the background reader thread (non-blocking)
+    pub fn poll_output(&mut self) {
+        if let Some(ref rx) = self.output_rx {
+            while let Ok(data) = rx.try_recv() {
+                let mut parser = self.parser.lock().unwrap();
+                parser.process(&data);
+            }
         }
     }
 
+    pub fn set_working_dir(&mut self, dir: PathBuf) {
+        self.current_dir = dir;
+    }
+
     pub fn send_input(&mut self, input: &str) {
-        if let Some(ref mut pty) = self.pty {
-            if let Ok(mut writer) = pty.master.take_writer() {
-                let _ = writer.write_all(input.as_bytes());
-                let _ = writer.flush();
-            }
+        if let Some(ref mut writer) = self.writer {
+            let _ = writer.write_all(input.as_bytes());
+            let _ = writer.flush();
         }
     }
 
@@ -96,34 +129,14 @@ impl TerminalPanel {
         self.send_input(&bytes);
     }
 
-    pub fn read_output(&mut self) -> Option<String> {
-        if let Some(ref mut pty) = self.pty {
-            if let Ok(mut reader) = pty.master.try_clone_reader() {
-                let mut buf = [0u8; 4096];
-                if let Ok(n) = reader.read(&mut buf) {
-                    if n > 0 {
-                        let mut parser = self.parser.lock().unwrap();
-                        parser.process(&buf[..n]);
-                        return Some(String::from_utf8_lossy(&buf[..n]).to_string());
-                    }
-                }
-            }
-        }
-        None
-    }
-
     pub fn screen_contents(&self) -> Vec<String> {
         let parser = self.parser.lock().unwrap();
         let screen = parser.screen();
-        (0..self.rows)
-            .map(|row| screen.row_wrapped(row).to_string())
+        screen
+            .contents()
+            .lines()
+            .map(|line| line.to_string())
             .collect()
-    }
-
-    pub fn cursor_position(&self) -> (u16, u16) {
-        let parser = self.parser.lock().unwrap();
-        let screen = parser.screen();
-        (screen.cursor_position().0, screen.cursor_position().1)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

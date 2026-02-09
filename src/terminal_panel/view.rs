@@ -22,15 +22,10 @@ pub fn view_terminal(terminal: &TerminalPanel) -> Element<'_, Message> {
 
     container(scrollable_content)
         .width(Length::Fill)
-        .height(Length::Fixed(200.0))
+        .height(Length::Fill)
         .padding(4)
         .style(|_theme| container::Style {
             background: Some(iced::Color::BLACK.into()),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.3, 0.3, 0.3),
-                width: 1.0,
-                radius: 0.0.into(),
-            },
             ..Default::default()
         })
         .into()
