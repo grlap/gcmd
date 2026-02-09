@@ -127,7 +127,19 @@ impl TerminalPanel {
     }
 
     pub fn set_working_dir(&mut self, dir: PathBuf) {
-        self.current_dir = dir;
+        if self.current_dir == dir {
+            return;
+        }
+        self.current_dir = dir.clone();
+        if self.is_running() {
+            // cd /d handles drive letter changes on Windows
+            let cd_cmd = if cfg!(windows) {
+                format!("cd /d \"{}\"\r", dir.display())
+            } else {
+                format!("cd \"{}\"\n", dir.display())
+            };
+            self.send_input(&cd_cmd);
+        }
     }
 
     pub fn send_input(&mut self, input: &str) {

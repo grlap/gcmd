@@ -380,6 +380,7 @@ impl App {
                     panel.set_cursor(entry_index);
                     panel.enter_selected();
                 }
+                self.sync_terminal_dir();
             }
 
             // Keyboard events
@@ -598,6 +599,7 @@ impl App {
                                 }
                             }
                             self.command_line.clear();
+                            self.sync_terminal_dir();
                             return self.scroll_to_cursor();
                         }
                         if !self.command_line.is_empty() {
@@ -610,6 +612,7 @@ impl App {
                             .map(|c| c.active_panel_mut().enter_selected())
                             .unwrap_or(false);
                         if navigated {
+                            self.sync_terminal_dir();
                             return self.scroll_to_cursor();
                         }
                     }
@@ -840,6 +843,14 @@ impl App {
             if !self.terminal.is_running() {
                 let _ = self.terminal.spawn_shell();
             }
+            self.sync_terminal_dir();
+        }
+    }
+
+    fn sync_terminal_dir(&mut self) {
+        if let Some(container) = self.active_tab_container_ref() {
+            let dir = container.active_panel().current_dir.clone();
+            self.terminal.set_working_dir(dir);
         }
     }
 
