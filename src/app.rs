@@ -32,6 +32,7 @@ pub enum MenuAction {
     Copy,
     Move,
     Delete,
+    MkDir,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +80,7 @@ pub enum Message {
     TerminalTick,
     // File operations
     FileOpFinished(Result<usize, String>),
+    MkDirInputChanged(String),
 }
 
 /// Tracks a tab being dragged between panes
@@ -100,6 +102,7 @@ pub struct App {
     command_line: String,
     file_viewer: Option<FileViewer>,
     file_op_dialog: Option<FileOpDialog>,
+    mkdir_input: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -109,6 +112,7 @@ pub enum Focus {
     Terminal,
     FileViewer,
     FileOpDialog,
+    MkDir,
 }
 
 impl Default for App {
@@ -136,6 +140,7 @@ impl Default for App {
             command_line: String::new(),
             file_viewer: None,
             file_op_dialog: None,
+            mkdir_input: String::new(),
         }
     }
 }
@@ -417,6 +422,11 @@ impl App {
             })) => {
                 // Escape cancels drag, closes viewer/dialog, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
+                    if self.focus == Focus::MkDir {
+                        self.focus = Focus::Panel;
+                        self.mkdir_input.clear();
+                        return Task::none();
+                    }
                     if self.file_op_dialog.is_some() {
                         self.close_file_op_dialog();
                         return Task::none();
@@ -471,6 +481,11 @@ impl App {
                 }
                 if key == keyboard::Key::Named(Named::F6) && self.focus == Focus::Panel {
                     self.initiate_file_op(FileOpKind::Move);
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(Named::F7) && self.focus == Focus::Panel {
+                    self.mkdir_input.clear();
+                    self.focus = Focus::MkDir;
                     return Task::none();
                 }
                 if key == keyboard::Key::Named(Named::F8) && self.focus == Focus::Panel {
@@ -545,6 +560,38 @@ impl App {
                             keyboard::Key::Named(Named::End) => viewer.scroll_to_bottom(),
                             _ => {}
                         }
+                    }
+                    return Task::none();
+                }
+
+                // Route to mkdir dialog if focused
+                if self.focus == Focus::MkDir {
+                    match key {
+                        keyboard::Key::Named(Named::Enter) => {
+                            let dir_name = self.mkdir_input.clone();
+                            if !dir_name.is_empty() {
+                                if let Some(container) = self.active_tab_container_mut() {
+                                    let panel = container.active_panel_mut();
+                                    let new_dir = panel.current_dir.join(&dir_name);
+                                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                                        eprintln!("Failed to create directory: {}", e);
+                                    } else {
+                                        panel.refresh();
+                                    }
+                                }
+                            }
+                            self.mkdir_input.clear();
+                            self.focus = Focus::Panel;
+                        }
+                        keyboard::Key::Named(Named::Backspace) => {
+                            self.mkdir_input.pop();
+                        }
+                        keyboard::Key::Character(ref c) => {
+                            if !modifiers.control() && !modifiers.alt() {
+                                self.mkdir_input.push_str(c.as_str());
+                            }
+                        }
+                        _ => {}
                     }
                     return Task::none();
                 }
@@ -838,6 +885,12 @@ impl App {
                             self.initiate_file_op(FileOpKind::Delete);
                         }
                     }
+                    MenuAction::MkDir => {
+                        if self.focus == Focus::Panel {
+                            self.mkdir_input.clear();
+                            self.focus = Focus::MkDir;
+                        }
+                    }
                     MenuAction::OpenCmd => {
                         let cwd = self
                             .active_tab_container_ref()
@@ -878,6 +931,9 @@ impl App {
                         }
                     }
                 }
+            }
+            Message::MkDirInputChanged(value) => {
+                self.mkdir_input = value;
             }
             Message::TerminalTick => {
                 self.terminal.poll_output();
@@ -1416,6 +1472,9 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill);
             stack![main_content, dialog_container].into()
+        } else if self.focus == Focus::MkDir {
+            let mkdir_overlay = self.view_mkdir_dialog();
+            stack![main_content, mkdir_overlay].into()
         } else {
             stack![main_content].into()
         }
@@ -1450,6 +1509,7 @@ impl App {
             ("Files", MenuAction::Refresh),
             ("Copy F5", MenuAction::Copy),
             ("Move F6", MenuAction::Move),
+            ("MkDir F7", MenuAction::MkDir),
             ("Delete F8", MenuAction::Delete),
             ("Copy Name", MenuAction::CopyName),
             ("Copy Path", MenuAction::CopyPath),
@@ -1494,6 +1554,81 @@ impl App {
         .into()
     }
 
+    fn view_mkdir_dialog(&self) -> Element<'_, Message> {
+        let title_bar = container(text(" Make Directory ").size(14))
+            .width(Length::Fill)
+            .padding([4, 8])
+            .style(|_theme| container::Style {
+                background: Some(iced::Color::from_rgb(0.0, 0.4, 0.6).into()),
+                ..Default::default()
+            });
+
+        let cursor = "▌";
+        let input_display = format!("{}{}", self.mkdir_input, cursor);
+        let input_area = container(
+            text(input_display)
+                .size(14)
+                .font(iced::Font::MONOSPACE)
+                .color(iced::Color::from_rgb(0.9, 0.9, 0.9)),
+        )
+        .width(Length::Fill)
+        .padding([8, 12])
+        .style(|_theme| container::Style {
+            background: Some(iced::Color::from_rgb(0.05, 0.05, 0.1).into()),
+            border: iced::Border {
+                color: iced::Color::from_rgb(0.3, 0.5, 0.7),
+                width: 1.0,
+                radius: 2.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let content_area = container(
+            column![
+                text("Enter directory name:").size(14),
+                input_area,
+            ]
+            .spacing(8),
+        )
+        .width(Length::Fill)
+        .padding([12, 16])
+        .style(|_theme| container::Style {
+            background: Some(iced::Color::from_rgb(0.1, 0.1, 0.15).into()),
+            ..Default::default()
+        });
+
+        let help_bar = container(text("Enter=Create  Esc=Cancel").size(12))
+            .width(Length::Fill)
+            .padding([4, 8])
+            .style(|_theme| container::Style {
+                background: Some(iced::Color::from_rgb(0.0, 0.3, 0.5).into()),
+                ..Default::default()
+            });
+
+        let dialog_box = container(column![title_bar, content_area, help_bar])
+            .width(Length::Fixed(400.0))
+            .style(|_theme| container::Style {
+                background: Some(iced::Color::from_rgb(0.05, 0.05, 0.1).into()),
+                border: iced::Border {
+                    color: iced::Color::from_rgb(0.3, 0.3, 0.4),
+                    width: 2.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            });
+
+        container(dialog_box)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.7).into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn view_status_bar(&self) -> Element<'_, Message> {
         const STATUS_FONT_SIZE: f32 = 14.0;
         let help = "Tab:Switch  Ctrl+T:NewTab  Ctrl+W:CloseTab  Ctrl+O:Terminal";
@@ -1529,6 +1664,7 @@ impl App {
                 .as_ref()
                 .map(|d| format!("[{}]", d.kind.label().to_uppercase()))
                 .unwrap_or_default(),
+            Focus::MkDir => "[MKDIR]".to_string(),
         };
 
         container(
