@@ -577,11 +577,21 @@ impl App {
                                         eprintln!("Failed to create directory: {}", e);
                                     } else {
                                         panel.refresh();
+                                        // Select the newly created directory
+                                        let base_name = std::path::Path::new(&dir_name)
+                                            .components()
+                                            .next()
+                                            .map(|c| c.as_os_str().to_string_lossy().to_string())
+                                            .unwrap_or(dir_name.clone());
+                                        if let Some(idx) = panel.entries.iter().position(|e| e.name == base_name) {
+                                            panel.cursor = idx;
+                                        }
                                     }
                                 }
                             }
                             self.mkdir_input.clear();
                             self.focus = Focus::Panel;
+                            return self.scroll_to_cursor();
                         }
                         keyboard::Key::Named(Named::Backspace) => {
                             self.mkdir_input.pop();
