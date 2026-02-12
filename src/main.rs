@@ -3,6 +3,7 @@ mod file_operation;
 mod file_viewer;
 mod folder_panel;
 mod panel;
+mod search;
 mod tab_container;
 mod terminal_panel;
 mod text_utils;

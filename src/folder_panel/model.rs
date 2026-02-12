@@ -55,6 +55,10 @@ pub struct FolderPanel {
     pub visible_rows: usize,
     /// Track the visible range (first visible row index)
     pub scroll_offset: usize,
+    /// When true, entries contain search results instead of directory listing
+    pub search_results_mode: bool,
+    /// The directory search was started from (for displaying relative paths)
+    pub search_base_dir: Option<PathBuf>,
 }
 
 impl Default for FolderPanel {
@@ -74,6 +78,8 @@ impl FolderPanel {
             scrollable_id: Id::unique(),
             visible_rows: 20, // Default estimate, will be updated based on window size
             scroll_offset: 0,
+            search_results_mode: false,
+            search_base_dir: None,
         };
         panel.load_entries();
         panel
@@ -219,7 +225,25 @@ impl FolderPanel {
             self.current_dir = path;
             self.cursor = 0;
             self.scroll_offset = 0;
+            self.search_results_mode = false;
             self.load_entries();
         }
+    }
+
+    /// Replace entries with search results
+    pub fn set_search_results(&mut self, results: Vec<FileEntry>, search_dir: PathBuf) {
+        self.entries = results;
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.search_results_mode = true;
+        self.search_base_dir = Some(search_dir);
+    }
+
+    /// Exit search results mode and return to normal directory listing
+    pub fn exit_search_mode(&mut self) {
+        self.search_results_mode = false;
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.load_entries();
     }
 }

@@ -9,6 +9,7 @@ use iced::{
 };
 
 use crate::file_operation::{FileOpDialog, FileOpItem, FileOpKind, FileOpState, view_file_op_dialog};
+use crate::search::{SearchDialog, SearchState, view_search_dialog};
 use crate::file_viewer::FileViewer;
 use crate::file_viewer::view_file_viewer;
 use crate::folder_panel::FolderPanel;
@@ -33,6 +34,7 @@ pub enum MenuAction {
     Move,
     Delete,
     MkDir,
+    Search,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,8 @@ pub enum Message {
     // File operations
     FileOpFinished(Result<usize, String>),
     MkDirInputChanged(String),
+    SearchFinished(Vec<crate::folder_panel::FileEntry>),
+    SearchTick,
 }
 
 /// Tracks a tab being dragged between panes
@@ -103,6 +107,7 @@ pub struct App {
     file_viewer: Option<FileViewer>,
     file_op_dialog: Option<FileOpDialog>,
     mkdir_input: String,
+    search_dialog: Option<SearchDialog>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -113,6 +118,7 @@ pub enum Focus {
     FileViewer,
     FileOpDialog,
     MkDir,
+    Search,
 }
 
 impl Default for App {
@@ -141,6 +147,7 @@ impl Default for App {
             file_viewer: None,
             file_op_dialog: None,
             mkdir_input: String::new(),
+            search_dialog: None,
         }
     }
 }
@@ -422,6 +429,11 @@ impl App {
             })) => {
                 // Escape cancels drag, closes viewer/dialog, clears command line, or returns focus to panels
                 if key == keyboard::Key::Named(Named::Escape) {
+                    if self.focus == Focus::Search {
+                        self.search_dialog = None;
+                        self.focus = Focus::Panel;
+                        return Task::none();
+                    }
                     if self.focus == Focus::MkDir {
                         self.focus = Focus::Panel;
                         self.mkdir_input.clear();
@@ -444,6 +456,16 @@ impl App {
                     if !self.command_line.is_empty() {
                         self.command_line.clear();
                         return Task::none();
+                    }
+                    // Escape exits search results mode
+                    if self.focus == Focus::Panel {
+                        if let Some(container) = self.active_tab_container_mut() {
+                            let panel = container.active_panel_mut();
+                            if panel.search_results_mode {
+                                panel.exit_search_mode();
+                                return self.scroll_to_cursor();
+                            }
+                        }
                     }
                     if self.focus == Focus::Terminal {
                         self.set_focus_to_pane(self.focus_pane);
@@ -481,6 +503,19 @@ impl App {
                 }
                 if key == keyboard::Key::Named(Named::F6) && self.focus == Focus::Panel {
                     self.initiate_file_op(FileOpKind::Move);
+                    return Task::none();
+                }
+                // Alt+F7 search (must be before F7 mkdir)
+                if key == keyboard::Key::Named(Named::F7)
+                    && modifiers.alt()
+                    && self.focus == Focus::Panel
+                {
+                    let search_dir = self
+                        .active_tab_container_ref()
+                        .map(|c| c.active_panel().current_dir.clone())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    self.search_dialog = Some(SearchDialog::new(search_dir));
+                    self.focus = Focus::Search;
                     return Task::none();
                 }
                 if key == keyboard::Key::Named(Named::F7) && self.focus == Focus::Panel {
@@ -619,6 +654,89 @@ impl App {
                                 if key == keyboard::Key::Named(Named::Enter) {
                                     self.close_file_op_dialog();
                                 }
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
+
+                // Route to search dialog if focused
+                if self.focus == Focus::Search {
+                    if let Some(ref mut dialog) = self.search_dialog {
+                        match dialog.state {
+                            SearchState::Input => match key {
+                                keyboard::Key::Named(Named::Tab) => {
+                                    dialog.toggle_field();
+                                }
+                                keyboard::Key::Named(Named::Enter) => {
+                                    if !dialog.name_pattern.is_empty()
+                                        || !dialog.find_text.is_empty()
+                                    {
+                                        dialog.state = SearchState::Searching;
+                                        let search_dir = dialog.search_dir.clone();
+                                        let name_pattern = dialog.name_pattern.clone();
+                                        let find_text = dialog.find_text.clone();
+                                        let progress = dialog.progress.clone();
+
+                                        return Task::perform(
+                                            async move {
+                                                let result: Vec<crate::folder_panel::FileEntry> =
+                                                    tokio::task::spawn_blocking(move || {
+                                                        crate::search::model::search_files(
+                                                            search_dir,
+                                                            name_pattern,
+                                                            find_text,
+                                                            progress,
+                                                        )
+                                                    })
+                                                    .await
+                                                    .unwrap_or_default();
+                                                result
+                                            },
+                                            Message::SearchFinished,
+                                        );
+                                    }
+                                }
+                                keyboard::Key::Named(Named::Backspace) => {
+                                    dialog.active_input_mut().pop();
+                                }
+                                keyboard::Key::Character(ref c)
+                                    if !modifiers.control() && !modifiers.alt() =>
+                                {
+                                    let char_to_add = if modifiers.shift() {
+                                        match c.as_str() {
+                                            ";" => ":".to_string(),
+                                            "`" => "~".to_string(),
+                                            "1" => "!".to_string(),
+                                            "2" => "@".to_string(),
+                                            "3" => "#".to_string(),
+                                            "4" => "$".to_string(),
+                                            "5" => "%".to_string(),
+                                            "6" => "^".to_string(),
+                                            "7" => "&".to_string(),
+                                            "8" => "*".to_string(),
+                                            "9" => "(".to_string(),
+                                            "0" => ")".to_string(),
+                                            "-" => "_".to_string(),
+                                            "=" => "+".to_string(),
+                                            "[" => "{".to_string(),
+                                            "]" => "}".to_string(),
+                                            "\\" => "|".to_string(),
+                                            "'" => "\"".to_string(),
+                                            "," => "<".to_string(),
+                                            "." => ">".to_string(),
+                                            "/" => "?".to_string(),
+                                            _ => c.as_str().to_uppercase(),
+                                        }
+                                    } else {
+                                        c.as_str().to_string()
+                                    };
+                                    dialog.active_input_mut().push_str(&char_to_add);
+                                }
+                                _ => {}
+                            },
+                            SearchState::Searching => {
+                                // No input while searching — Escape already handled above
                             }
                         }
                     }
@@ -901,6 +1019,16 @@ impl App {
                             self.focus = Focus::MkDir;
                         }
                     }
+                    MenuAction::Search => {
+                        if self.focus == Focus::Panel {
+                            let search_dir = self
+                                .active_tab_container_ref()
+                                .map(|c| c.active_panel().current_dir.clone())
+                                .unwrap_or_else(|| std::path::PathBuf::from("."));
+                            self.search_dialog = Some(SearchDialog::new(search_dir));
+                            self.focus = Focus::Search;
+                        }
+                    }
                     MenuAction::OpenCmd => {
                         let cwd = self
                             .active_tab_container_ref()
@@ -944,6 +1072,27 @@ impl App {
             }
             Message::MkDirInputChanged(value) => {
                 self.mkdir_input = value;
+            }
+            Message::SearchFinished(results) => {
+                let search_dir = self
+                    .search_dialog
+                    .as_ref()
+                    .map(|d| d.search_dir.clone())
+                    .unwrap_or_default();
+                self.search_dialog = None;
+                self.focus = Focus::Panel;
+                if let Some(container) = self.active_tab_container_mut() {
+                    container
+                        .active_panel_mut()
+                        .set_search_results(results, search_dir);
+                }
+            }
+            Message::SearchTick => {
+                if let Some(ref mut dialog) = self.search_dialog {
+                    if let Ok(dir) = dialog.progress.lock() {
+                        dialog.current_search_dir = dir.clone();
+                    }
+                }
             }
             Message::TerminalTick => {
                 self.terminal.poll_output();
@@ -1216,6 +1365,32 @@ impl App {
                         "l" => Some(TerminalKey::CtrlL),
                         _ => None,
                     }
+                } else if modifiers.shift() {
+                    let shifted = match c.as_str() {
+                        ";" => ":".to_string(),
+                        "`" => "~".to_string(),
+                        "1" => "!".to_string(),
+                        "2" => "@".to_string(),
+                        "3" => "#".to_string(),
+                        "4" => "$".to_string(),
+                        "5" => "%".to_string(),
+                        "6" => "^".to_string(),
+                        "7" => "&".to_string(),
+                        "8" => "*".to_string(),
+                        "9" => "(".to_string(),
+                        "0" => ")".to_string(),
+                        "-" => "_".to_string(),
+                        "=" => "+".to_string(),
+                        "[" => "{".to_string(),
+                        "]" => "}".to_string(),
+                        "\\" => "|".to_string(),
+                        "'" => "\"".to_string(),
+                        "," => "<".to_string(),
+                        "." => ">".to_string(),
+                        "/" => "?".to_string(),
+                        _ => c.as_str().to_uppercase(),
+                    };
+                    shifted.chars().next().map(TerminalKey::Char)
                 } else {
                     c.chars().next().map(TerminalKey::Char)
                 }
@@ -1249,15 +1424,27 @@ impl App {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let events = event::listen().map(Message::EventOccurred);
+        let mut subs = vec![events];
+
         if self.terminal.is_running() {
-            Subscription::batch([
-                events,
+            subs.push(
                 iced::time::every(std::time::Duration::from_millis(50))
                     .map(|_| Message::TerminalTick),
-            ])
-        } else {
-            events
+            );
         }
+
+        let is_searching = self
+            .search_dialog
+            .as_ref()
+            .is_some_and(|d| d.state == SearchState::Searching);
+        if is_searching {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(100))
+                    .map(|_| Message::SearchTick),
+            );
+        }
+
+        Subscription::batch(subs)
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -1315,11 +1502,12 @@ impl App {
         let pane_grid_view =
             pane_grid::PaneGrid::new(&self.panes, |pane, tab_container, _is_maximized| {
                 let is_focused = pane == self.focus_pane;
-                let current_path = tab_container
-                    .active_panel()
-                    .current_dir
-                    .to_string_lossy()
-                    .to_string();
+                let panel = tab_container.active_panel();
+                let current_path = if panel.search_results_mode {
+                    format!("[Search Results: {} items]", panel.entries.len())
+                } else {
+                    panel.current_dir.to_string_lossy().to_string()
+                };
 
                 // Check if this pane is the drop target based on 10% overlap calculation
                 let is_drop_target = drop_target_pane.is_some_and(|target| target == pane);
@@ -1478,13 +1666,23 @@ impl App {
             stack![main_content, viewer_container].into()
         } else if let Some(ref dialog) = self.file_op_dialog {
             let dialog_content = view_file_op_dialog(dialog);
-            let dialog_container = container(dialog_content)
-                .width(Length::Fill)
-                .height(Length::Fill);
+            let dialog_container = mouse_area(
+                container(dialog_content)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::MkDirInputChanged(String::new()));
             stack![main_content, dialog_container].into()
         } else if self.focus == Focus::MkDir {
-            let mkdir_overlay = self.view_mkdir_dialog();
+            let mkdir_overlay =
+                mouse_area(self.view_mkdir_dialog())
+                    .on_press(Message::MkDirInputChanged(String::new()));
             stack![main_content, mkdir_overlay].into()
+        } else if let Some(ref dialog) = self.search_dialog {
+            let search_overlay =
+                mouse_area(view_search_dialog(dialog))
+                    .on_press(Message::MkDirInputChanged(String::new()));
+            stack![main_content, search_overlay].into()
         } else {
             stack![main_content].into()
         }
@@ -1521,6 +1719,7 @@ impl App {
             ("Move F6", MenuAction::Move),
             ("MkDir F7", MenuAction::MkDir),
             ("Delete F8", MenuAction::Delete),
+            ("Search Alt+F7", MenuAction::Search),
             ("Copy Name", MenuAction::CopyName),
             ("Copy Path", MenuAction::CopyPath),
             ("New Tab", MenuAction::NewTab),
@@ -1675,6 +1874,7 @@ impl App {
                 .map(|d| format!("[{}]", d.kind.label().to_uppercase()))
                 .unwrap_or_default(),
             Focus::MkDir => "[MKDIR]".to_string(),
+            Focus::Search => "[SEARCH]".to_string(),
         };
 
         container(

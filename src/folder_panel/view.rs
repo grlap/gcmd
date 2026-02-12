@@ -103,7 +103,26 @@ impl Panel for FolderPanel {
     }
 
     fn enter_selected(&mut self) -> bool {
-        if let Some(entry) = self.entries.get(self.cursor) {
+        if let Some(entry) = self.entries.get(self.cursor).cloned() {
+            // In search results mode, Enter navigates to the result's location
+            if self.search_results_mode {
+                let target_dir = if entry.is_dir {
+                    entry.path.clone()
+                } else {
+                    entry.path.parent().unwrap_or(&entry.path).to_path_buf()
+                };
+                let target_name = entry.name.clone();
+                self.search_results_mode = false;
+                self.navigate_to(target_dir);
+                // Select the file/folder in the directory listing
+                if !entry.is_dir {
+                    if let Some(idx) = self.entries.iter().position(|e| e.name == target_name) {
+                        self.cursor = idx;
+                    }
+                }
+                return true;
+            }
+
             if entry.is_dir {
                 // Check if navigating to parent (..)
                 let is_parent = entry.name == "..";
@@ -135,6 +154,12 @@ impl Panel for FolderPanel {
     }
 
     fn go_parent(&mut self) -> bool {
+        // In search results mode, Backspace exits search and returns to normal dir
+        if self.search_results_mode {
+            self.exit_search_mode();
+            return true;
+        }
+
         // Remember the current directory name before navigating up
         let current_dir_name = self
             .current_dir
@@ -170,6 +195,9 @@ impl Panel for FolderPanel {
     }
 
     fn refresh(&mut self) {
+        if self.search_results_mode {
+            return; // Don't reload directory when showing search results
+        }
         let was_active = self.is_active;
         let old_cursor = self.cursor;
         let old_scroll = self.scroll_offset;
@@ -301,12 +329,13 @@ fn view_entries_with_pane(
     panel_width: f32,
 ) -> Element<'_, Message> {
     let max_chars = calc_max_name_chars(panel_width);
+    let search_base = panel.search_base_dir.clone();
     let entries: Vec<Element<Message>> = panel
         .entries
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            view_entry_with_pane(entry, idx, idx == panel.cursor, panel.is_active, pane, max_chars)
+            view_entry_with_pane(entry, idx, idx == panel.cursor, panel.is_active, pane, max_chars, &search_base)
         })
         .collect();
 
@@ -328,6 +357,7 @@ fn view_entry_with_pane(
     is_active_panel: bool,
     pane: pane_grid::Pane,
     max_name_chars: usize,
+    search_base: &Option<std::path::PathBuf>,
 ) -> Element<'static, Message> {
     let name_color = if entry.is_dir() {
         iced::Color::from_rgb(0.4, 0.7, 1.0)
@@ -346,8 +376,18 @@ fn view_entry_with_pane(
     };
 
     let icon = if entry.is_dir() { "/" } else { " " };
-    // Truncate long filenames based on calculated max chars for panel width
-    let truncated_name = truncate(entry.name(), max_name_chars);
+    // In search mode, show path relative to search directory
+    let display_name = if let Some(base) = search_base {
+        entry
+            .path
+            .strip_prefix(base)
+            .unwrap_or(&entry.path)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        entry.name().to_string()
+    };
+    let truncated_name = truncate(&display_name, max_name_chars);
     let name_display = format!("{}{}", icon, truncated_name);
 
     let entry_row = row![
