@@ -85,6 +85,7 @@ pub enum Message {
     MkDirInputChanged(String),
     SearchFinished(Vec<crate::folder_panel::FileEntry>),
     SearchTick,
+    ClipboardPaste(String),
 }
 
 /// Tracks a tab being dragged between panes
@@ -530,6 +531,12 @@ impl App {
 
                 // Global shortcuts
                 if let keyboard::Key::Character(ref c) = key {
+                    // Ctrl+V paste from clipboard
+                    if c.as_str() == "v" && modifiers.control() {
+                        return iced::clipboard::read().map(|opt| {
+                            Message::ClipboardPaste(opt.unwrap_or_default())
+                        });
+                    }
                     // Ctrl+O toggles terminal focus
                     if c.as_str() == "o" && modifiers.control() {
                         self.toggle_terminal_focus();
@@ -1096,6 +1103,32 @@ impl App {
             }
             Message::TerminalTick => {
                 self.terminal.poll_output();
+            }
+            Message::ClipboardPaste(text) => {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                match self.focus {
+                    Focus::Terminal => {
+                        self.terminal.send_input(&text);
+                    }
+                    Focus::Panel => {
+                        self.command_line.push_str(&text);
+                        self.search_from_command_line();
+                        return self.scroll_if_cursor_not_visible();
+                    }
+                    Focus::MkDir => {
+                        self.mkdir_input.push_str(&text);
+                    }
+                    Focus::Search => {
+                        if let Some(ref mut dialog) = self.search_dialog {
+                            if dialog.state == SearchState::Input {
+                                dialog.active_input_mut().push_str(&text);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             _ => {}
         }
