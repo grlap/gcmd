@@ -189,19 +189,19 @@ impl TerminalPanel {
     }
 
     /// Try to detect the shell's current directory from the prompt line.
-    /// On Windows cmd.exe, the prompt looks like "C:\Users\grzeg>"
+    /// Windows cmd.exe: "C:\Users\grzeg>"
+    /// Linux bash: "user@host:/path$" or "user@host:~$" or "user@host:~/sub$"
     pub fn detect_cwd(&self) -> Option<PathBuf> {
         let parser = self.parser.lock().unwrap();
         let screen = parser.screen();
         let (cursor_row, _) = screen.cursor_position();
 
-        // Check the cursor row for a prompt pattern like "X:\...>"
         let line = screen
             .contents_between(cursor_row, 0, cursor_row, self.cols - 1)
             .trim()
             .to_string();
 
-        // cmd.exe prompt: "C:\some\path>"
+        // Windows cmd.exe prompt: "C:\some\path>"
         if let Some(pos) = line.rfind('>') {
             let candidate = &line[..pos];
             let path = PathBuf::from(candidate);
@@ -209,6 +209,34 @@ impl TerminalPanel {
                 return Some(path);
             }
         }
+
+        // Linux/macOS bash prompt: "user@host:/path$ " or "user@host:~$ "
+        // Look for `:path$` or `:path#` pattern
+        if let Some(colon_pos) = line.rfind(':') {
+            let after_colon = &line[colon_pos + 1..];
+            // Strip trailing $ or # and whitespace
+            let path_str = after_colon
+                .trim_end()
+                .trim_end_matches('$')
+                .trim_end_matches('#')
+                .trim_end();
+            if !path_str.is_empty() {
+                // Expand ~ to home directory
+                let expanded = if path_str == "~" {
+                    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+                } else if let Some(rest) = path_str.strip_prefix("~/") {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("/"))
+                        .join(rest)
+                } else {
+                    PathBuf::from(path_str)
+                };
+                if expanded.is_dir() {
+                    return Some(expanded);
+                }
+            }
+        }
+
         None
     }
 
